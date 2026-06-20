@@ -1,0 +1,55 @@
+# T-SSL ablation: ViT-L @ 128px / 32f. ~4x fewer tokens than 256px (8x8 grid),
+# so masks are re-tuned (see masking.mask_config_for) and batch size can grow.
+meta:
+  folder: /scratch1/hongn/artijepa/runs/tssl_vitl_128
+  seed: 0
+  dtype: float16
+  eval_freq: 1
+  save_freq: 1
+  probe_max_batches: 20   # held-out clips for label-free collapse metrics
+  max_steps: null
+  resume: null            # path to latest.pt to CONTINUE training (or CLI --resume)
+  snapshot_freq: null     # if set, also keep epoch_NN.pt every N epochs (history)
+
+data:
+  manifest: /scratch1/hongn/artijepa/manifest_split.csv
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats_128.json
+  spatial_size: 128
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 25.0        # 1.28 s / 32-frame chunk
+  sampling: tile          # resample whole video @25fps, split into 32f chunks (~23.5/vid -> 42k train chunks)
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  augment: true
+  batch_size: 16
+  probe_batch_size: 32     # batch for the held-out collapse-monitor loader
+  num_workers: 4   # match cpus_per_task; raise on larger allocations
+  pin_mem: true
+
+model:
+  model_name: vit_large
+  pretrained: true
+  checkpoint: null
+  checkpoint_key: target_encoder
+  use_activation_checkpointing: true
+
+mask: null
+
+loss:
+  loss_exp: 1.0
+
+optimization:
+  epochs: 50
+  ipe: 500                # fixed epoch length (tile mode: ~2.6k batches/epoch @ bs16)
+  lr: 5.0e-4
+  start_lr: 1.0e-4
+  final_lr: 1.0e-5
+  warmup: 5
+  weight_decay: 0.04
+  final_weight_decay: 0.04
+  ema: [0.998, 1.0]
+  ipe_scale: 1.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8

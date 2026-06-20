@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.ipynb_checkpoints/
+
+# Local Claude Code settings (personal, not shared)
+.claude/settings.local.json
+
+# Data, checkpoints, logs, outputs (keep large artifacts out of git)
+*.ckpt
+*.pt
+*.pth
+*.npy
+*.npz
+*.log
+data/
+outputs/
+checkpoints/
+runs/
+wandb/
+
+# Env / OS
+.env
+.DS_Store

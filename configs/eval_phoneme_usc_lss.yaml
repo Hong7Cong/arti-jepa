@@ -1,0 +1,37 @@
+# Phoneme-prediction eval, Task 2: GOLD phonemes, OOD speaker usc_lss.
+# 104x104 @ 99 fps video -> resampled to target_fps (frame-rate agnostic align).
+meta:
+  out: /scratch1/hongn/artijepa/eval
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/phoneme
+  seed: 0
+  dtype: bfloat16          # L40S (Ada) bf16; use float16 on V100
+  tag: null                # null -> derived from encoder.spec
+
+data:
+  kind: usc_lss
+  manifest: /scratch1/hongn/usc_lss/phoneme_manifest.csv   # build via artijepa.usc_lss.build_manifest
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
+  spatial_size: 128        # 128 fast / 256 headline; encoder is res-agnostic (RoPE)
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 25.0         # 32f = 1.28 s; tubelet 2 -> 16 tokens @ 12.5 Hz (80 ms)
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  batch_size: 16           # extraction batch
+  num_workers: 4
+
+encoder:
+  spec: pretrained         # 'pretrained' (vitl.pt baseline) | runs/<name>/latest.pt
+  model_name: vit_large
+  checkpoint: null
+  key: auto                # auto: target_encoder for ckpts, else encoder
+
+probe:
+  type: tcn                # per-token classifier: linear | mlp | tcn (temporal conv)
+  epochs: 40
+  warmup: 4
+  lr: 1.0e-3
+  wd: 0.01
+  hidden: 512
+  batch_size: 32

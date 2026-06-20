@@ -1,0 +1,34 @@
+# Arti-JEPA preprocessing template (Part A / A.9). Consumed implicitly by the
+# data.* block of the T-SSL configs; kept here as the documented source of truth.
+preprocess:
+  intensity:
+    clip_percentiles: [1, 99]
+    norm: zscore          # {zscore, minmax, none}
+    scope: per_clip       # per_clip (default) | per_video (ablation)
+  grayscale_norm:         # global train-set stats, computed by compute_stats.py
+    mean: null            # -> grayscale_stats.json
+    std: null
+  temporal:
+    target_fps: 50        # 83.28 -> 50 by linear interpolation in the dataloader
+    method: linear_interp
+    realize_in: dataloader
+    ablations: [83, 25]   # frame-rate aliasing checks
+  spatial:
+    primary: {resize: 256, interp: bicubic}   # max reuse of pretrained scale
+    ablations:
+      - {resize: 128}
+      - {pad_to: 96, mode: reflect}
+  channels: replicate_to_3
+  clip:
+    length_frames: 32     # 640 ms @ 50 fps; even (tubelet T=2)
+    even_only: true
+    stride: random_temporal_crop
+    ablations: [16, 64]
+  augment:
+    enabled: [translate_small, intensity_jitter, gaussian_noise, speed_perturb]
+    disabled: [hflip, large_rotation, color_jitter]   # anatomically destructive
+  split:
+    by: speaker
+    disjoint: true
+    val_frac: 0.12
+    test_frac: 0.12

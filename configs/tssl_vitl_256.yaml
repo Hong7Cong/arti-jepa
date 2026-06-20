@@ -1,0 +1,62 @@
+# T-SSL: domain-adaptive V-JEPA pre-training on rtMRI, ViT-L @ 256px / 32f.
+# Primary config (Arti-JEPA Phase 3, headline "with-T-SSL" run).
+meta:
+  folder: /scratch1/hongn/artijepa/runs/tssl_vitl_256
+  seed: 0
+  dtype: float16          # V100 (Volta) has no bf16 tensor cores -> fp16 + GradScaler
+  eval_freq: 1            # run label-free collapse diagnostics every N epochs
+  save_freq: 1
+  probe_max_batches: 20   # held-out clips for collapse metrics
+  max_steps: null
+  resume: null            # path to latest.pt to CONTINUE training (or CLI --resume)
+  snapshot_freq: null     # if set, also keep epoch_NN.pt every N epochs (history)
+
+data:
+  manifest: /scratch1/hongn/artijepa/manifest_split.csv
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 25.0        # 1.28 s / 32-frame chunk
+  sampling: tile          # resample whole video @25fps, split into 32f chunks (~23.5/vid -> 42k train chunks)
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  augment: true
+  batch_size: 32          # micro-batch. V100-32GB: act-ckpt is MANDATORY at 256px
+                          # (no-ckpt OOMs even at bs8 -- target sees all 4096 tokens).
+                          # bs32+ckpt = ~20 GB peak, ~13% faster/clip than bs8 (better
+                          # GPU efficiency); bs64 OOMs. accum=eff/bs=2, oue unchanged.
+  probe_batch_size: 8     # batch for the held-out collapse-monitor loader
+  num_workers: 2   # the SLURM job is capped at 16 GB host RAM; 256px clips are 4x
+  pin_mem: false   # bigger than 128px, so pinned workers OOM'd the cgroup -> 2, no pin
+
+model:
+  model_name: vit_large
+  pretrained: true
+  checkpoint: null        # auto-download vitl.pt to /scratch1/hongn/artijepa/checkpoints
+  checkpoint_key: target_encoder
+  use_activation_checkpointing: true
+
+mask: null                # null -> masking.mask_config_for(grid) (re-tuned per grid)
+
+loss:
+  loss_exp: 1.0           # L1 feature loss
+
+optimization:
+  epochs: 50              # data-bounded; early-stop on collapse/plateau
+  ipe: 500                # micro-batches/epoch: 500 x bs32 = 16k chunks/epoch (kept
+                          #   constant); /accum 2 -> 250 optimizer-updates/epoch (oue
+                          #   unchanged vs bs8/ipe2000, so resume + schedules are identical)
+  effective_batch: 64     # grad-accum: accum_steps = effective_batch / batch_size = 2
+                          #   schedules step per optimizer-update; eff_batch fixed at 64
+  lr: 5.0e-4              # cosine; lower than the 5.25e-4 large-batch pretrain default
+  start_lr: 1.0e-4
+  final_lr: 1.0e-5
+  warmup: 5               # epochs
+  weight_decay: 0.04
+  final_weight_decay: 0.04
+  ema: [0.998, 1.0]       # target-encoder momentum schedule (small-data tuned)
+  ipe_scale: 1.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8

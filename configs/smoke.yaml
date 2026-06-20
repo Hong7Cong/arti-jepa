@@ -1,0 +1,53 @@
+# Tiny end-to-end smoke config: ViT-tiny @ 96px(pad) / 16f, no pretrained weights,
+# a couple of steps. Runs on CPU in well under a minute -- validates the full
+# data -> mask -> encoder -> predictor -> L1 loss -> EMA -> diagnostics path.
+meta:
+  folder: /scratch1/hongn/artijepa/runs/smoke
+  seed: 0
+  dtype: float32
+  eval_freq: 1
+  save_freq: 1
+  probe_label: group_idx
+  probe_max_batches: 2
+  max_steps: 3
+
+data:
+  manifest: /scratch1/hongn/artijepa/manifest_split.csv
+  grayscale_stats: null
+  spatial_size: 96
+  spatial_mode: pad
+  frames_per_clip: 16
+  target_fps: 50.0
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  augment: true
+  batch_size: 2
+  probe_batch_size: 4
+  num_workers: 0
+  pin_mem: false
+  num_classes: 9
+
+model:
+  model_name: vit_tiny
+  pretrained: false
+  use_activation_checkpointing: false
+
+mask: null
+
+loss:
+  loss_exp: 1.0
+
+optimization:
+  epochs: 1
+  ipe: 3
+  lr: 5.0e-4
+  start_lr: 1.0e-4
+  final_lr: 1.0e-5
+  warmup: 1
+  weight_decay: 0.04
+  final_weight_decay: 0.04
+  ema: [0.996, 1.0]
+  ipe_scale: 1.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8

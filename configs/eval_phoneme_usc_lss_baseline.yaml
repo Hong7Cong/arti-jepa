@@ -1,0 +1,40 @@
+# Phoneme-prediction eval, Task 2 (GOLD, OOD usc_lss) -- IMAGE-ENCODER BASELINES.
+# Frozen 2-D image encoders (CLIP/SigLIP/DINOv2/supervised ViT-L/ResNet) applied
+# per-frame + tubelet-pooled to V-JEPA's temporal token grid, same probe+labels.
+# Pick the encoder with `--model {clip|siglip|dinov2|vitl|resnet}` (+ `--tag`).
+# Plan Part C: quantifies the JEPA-specific benefit vs generic pretrained vision.
+meta:
+  out: /scratch1/hongn/artijepa/eval
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/phoneme
+  seed: 0
+  dtype: float16          # P100 (no bf16); fine for frozen feature extraction
+  tag: null               # set per model via --tag (e.g. base_clip)
+
+data:
+  kind: usc_lss
+  manifest: /scratch1/hongn/usc_lss/phoneme_manifest.csv
+  # NB: spatial_size + intensity_norm are auto-set per model (native size, minmax
+  # [0,1], no rtMRI channel-norm) in load_frozen_encoder -- values here are placeholders.
+  spatial_size: 224
+  spatial_mode: resize
+  intensity_norm: minmax
+  frames_per_clip: 32
+  target_fps: 25.0        # seconds-based align -> 99 fps OOD handled by resample
+  tubelet_size: 2
+  patch_size: 16
+  batch_size: 8           # extraction batch (use --batch 2 for dinov2 @518px)
+  num_workers: 2          # 16 GB host-RAM cap; no pinning
+
+encoder:
+  type: image_baseline    # triggers the timm per-frame baseline path
+  model: clip             # clip | siglip | dinov2 | vitl | resnet (or full timm name)
+  frame_batch: 32         # frames/forward sub-batch (bounds GPU mem at 518px)
+
+probe:                    # identical to the V-JEPA eval -> apples-to-apples
+  type: tcn
+  epochs: 40
+  warmup: 4
+  lr: 1.0e-3
+  wd: 0.01
+  hidden: 512
+  batch_size: 32

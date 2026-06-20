@@ -1,0 +1,42 @@
+# Phoneme-prediction eval, Task 1: PSEUDO phonemes (audio-model CTC) on the
+# 75-speaker corpus (in-domain speakers). PREREQUISITE: generate the cached label
+# streams first (decoupled, transformers-compatible env):
+#   python -c "from artijepa.audio_phoneme import build_pseudo_labels as b; \
+#              b('/scratch1/hongn/artijepa/manifest_split.csv')"
+# -> writes /scratch1/hongn/artijepa/pseudo_phonemes/{<stem>.npy, vocab.json, frame_fps.json}
+meta:
+  out: /scratch1/hongn/artijepa/eval
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/phoneme
+  seed: 0
+  dtype: bfloat16
+  tag: null
+
+data:
+  kind: pseudo
+  manifest: /scratch1/hongn/artijepa/manifest_split.csv     # 75-speaker, subject-disjoint
+  label_dir: /scratch1/hongn/artijepa/pseudo_phonemes        # cached CTC label streams
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
+  spatial_size: 128
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 25.0
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  batch_size: 16
+  num_workers: 4
+
+encoder:
+  spec: pretrained
+  model_name: vit_large
+  checkpoint: null
+  key: auto
+
+probe:
+  type: tcn
+  epochs: 40
+  warmup: 4
+  lr: 1.0e-3
+  wd: 0.01
+  hidden: 512
+  batch_size: 32
