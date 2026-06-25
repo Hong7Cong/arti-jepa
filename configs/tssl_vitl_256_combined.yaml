@@ -1,0 +1,66 @@
+# T-SSL: domain-adaptive V-JEPA pre-training, ViT-L @ 256px / 32f.
+# COMBINED pre-training pool = rtMRI-75 (manifest_alltrain) + longitudinal corpus.
+# Distinct run name from the 75-only run (runs/tssl_vitl_256) so its checkpoints
+# are preserved -> this is the WITH-longitudinal arm of the ablation.
+meta:
+  folder: /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined
+  seed: 0
+  dtype: float16          # V100 (Volta) has no bf16 tensor cores -> fp16 + GradScaler
+  eval_freq: 1            # run label-free collapse diagnostics every N epochs
+  save_freq: 1            # checkpoint every epoch (= every ipe=500 micro-steps) -> resumable
+  probe_max_batches: 20   # held-out clips for collapse metrics
+  max_steps: null         # bound wall-clock per allocation if needed (CLI --max-steps)
+  resume: null            # set to runs/tssl_vitl_256_combined/latest.pt to CONTINUE
+  snapshot_freq: null     # if set, also keep epoch_NN.pt every N epochs (history)
+
+data:
+  # rtMRI-75 all-train + longitudinal (21 disjoint speakers), every row split=train.
+  # 9,353 train videos -> 343,517 tile chunks @ 256/50fps. Build with
+  # scripts/01b_prepare_longitudinal.sh. WITHOUT-longitudinal baseline =
+  # configs/tssl_vitl_256.yaml (manifest_alltrain.csv, runs/tssl_vitl_256).
+  manifest: /scratch1/hongn/artijepa/manifest_combined.csv
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats_combined.json
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 50.0        # 0.64 s / 32-frame chunk
+  sampling: tile          # resample whole video @50fps, split into 32f chunks
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  augment: true
+  batch_size: 32          # micro-batch. V100-32GB: act-ckpt MANDATORY at 256px.
+                          # accum = eff/bs = 4 (eff_batch 128). bs64 OOMs.
+  probe_batch_size: 8     # batch for the held-out collapse-monitor loader
+  num_workers: 2          # SLURM job capped at 16 GB host RAM; 256px clips are big
+  pin_mem: false          # pinned workers OOM'd the cgroup at 256px -> 2 workers, no pin
+
+model:
+  model_name: vit_large
+  pretrained: true        # T-SSL = domain-adaptive continuation from V-JEPA2 ViT-L
+  checkpoint: null        # auto-resolve vitl.pt under /scratch1/hongn/artijepa/checkpoints
+  checkpoint_key: target_encoder
+  use_activation_checkpointing: true
+
+mask: null                # null -> masking.mask_config_for(grid) (re-tuned per grid)
+
+loss:
+  loss_exp: 1.0           # L1 feature loss
+
+optimization:
+  # 215 epochs x ipe 500 x bs 32 = 3.44M chunk-samples = ~10 passes over the 343k
+  # pool (~99.995% of chunks seen). Schedule horizon is oue*epochs = 125*215 =
+  # 26,875 optimizer-updates; cosine LR is stretched over the full run.
+  epochs: 215
+  ipe: 500                # micro-batches/epoch (fixed); /accum 4 -> 125 oue/epoch
+  effective_batch: 128    # grad-accum: accum_steps = effective_batch / batch_size = 4
+  lr: 5.0e-4              # cosine
+  start_lr: 1.0e-4
+  final_lr: 1.0e-5
+  warmup: 5               # epochs (= 625 optimizer-updates, ~2.3% of the run)
+  weight_decay: 0.04
+  final_weight_decay: 0.04
+  ema: [0.998, 1.0]       # target-encoder momentum schedule (small-data tuned)
+  ipe_scale: 1.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8

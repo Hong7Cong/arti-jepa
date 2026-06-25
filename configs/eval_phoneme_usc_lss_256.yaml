@@ -16,7 +16,7 @@ data:
   spatial_size: 256
   spatial_mode: resize
   frames_per_clip: 32
-  target_fps: 25.0
+  target_fps: 50.0        # match the 50 fps 256px T-SSL encoder; 32f = 0.64 s, tubelet 2 -> 16 tokens @ 25 Hz (40 ms)
   tubelet_size: 2
   patch_size: 16
   intensity_norm: zscore

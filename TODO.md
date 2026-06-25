@@ -30,6 +30,30 @@ Artifacts under `/scratch1/hongn/artijepa/` (never `/project2`):
 ---
 
 ## DONE
+- [x] **Longitudinal corpus added to the T-SSL pre-training pool (2026-06-24).**
+      `/project2/shrikann_35/kevinyhu/data/longitudinal` — 21 disjoint speakers,
+      **7,110 `.avi` clips, 104×104 @ ~81.97 fps** (USC `rt_ssfp`, no labels →
+      pre-train only). New `build_manifest_longitudinal.py` (parses `nframes`/`tRes`
+      from the clip name, auto-decord-probes the 197 short-named residual →
+      `manifest_longitudinal.csv`), `merge_manifests.py` (column-reconciling concat +
+      subject-collision/leakage guard → `manifest_combined.csv`), and
+      `scripts/01b_prepare_longitudinal.sh`. Combined train pool: 9,353 videos →
+      **343,517 tile chunks @ 256/50fps** (236k longitudinal + 107k 75-speaker, ~4×
+      the prior 85.6k); 96 subjects, no overlap. Dataloader needed **zero changes**
+      (already per-row resolution/fps-agnostic). Validated a longitudinal clip
+      end-to-end (`(3,32,256,256)`, finite) + `tests/test_longitudinal_smoke.py` (12/12).
+- [ ] **WITH-longitudinal 256px T-SSL run — LAUNCHED (2026-06-24), in progress.**
+      New config `configs/tssl_vitl_256_combined.yaml` (folder
+      `runs/tssl_vitl_256_combined`, **epochs 215** = ~10 passes / ~99.995% coverage,
+      `ipe=500`, eff_batch 128), fresh from V-JEPA2 ViT-L (`pretrained: true`,
+      `resume: null`; loaded 292/292 clean). Healthy start on the V100: loss ~0.52,
+      ~12.5 s/micro-step → **~1.7 h/epoch, ~15 days total**, so it spans multiple
+      allocations — checkpoints every epoch (latest.pt). **Resume in a fresh alloc:**
+      `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True bash scripts/03_train_tssl.sh
+      configs/tssl_vitl_256_combined.yaml --resume runs/tssl_vitl_256_combined/latest.pt`.
+      The 75-only `runs/tssl_vitl_256` ckpt (without-longitudinal baseline) is
+      untouched. **Next:** phoneme-eval the combined checkpoint vs the 75-only one
+      (κ + PER, gold OOD `usc_lss`) to measure the longitudinal lift.
 - [x] **Phase 0 — data engineering (A.1–A.9).** manifest, subject-disjoint splits,
       grayscale stats, decord linear-interp resample (`crop`/`tile`), safe aug.
 - [x] **T-SSL trainer (B.3).** `tssl_train.py` (EMA target, L1 feat loss,

@@ -37,11 +37,25 @@ clips, **84×84 @ 83.28 fps**, mpeg4 grayscale, ~40 s each, with a paired audio
 stream. `metafile_public_*.json` carries demographics + the per-clip task list.
 All generated artifacts go under `/scratch1/hongn/artijepa/` (never `/project2`).
 
+**Longitudinal pre-training corpus** (T-SSL only):
+`/project2/shrikann_35/kevinyhu/data/longitudinal/ID{01..21}/D{day}.{sess}/video/*.avi`
+— 21 speakers measured over repeated sessions, **7,110 clips, 104×104 @ ~81.97 fps**
+USC `rt_ssfp` rtMRI (same scanner family as the 75-set). Speakers are **disjoint**
+from the 75-set, there are **no dense labels**, so it feeds the unlabeled T-SSL
+objective only (never the phoneme eval). The dataloader is resolution/fps-agnostic
+per manifest row, so the 104×104/82 fps clips are resized + temporally resampled to
+the same grid as the 84×84/83 fps clips at load time — no per-corpus code path. The
+two corpora are merged into one `manifest_combined.csv` for pre-training (see below).
+
 ## Pipeline
 
 ```bash
 # Phase 0 — data engineering (manifest -> subject-disjoint splits -> grayscale stats)
 bash dev_artiJEPA/scripts/01_prepare_data.sh        # ~few min (decord probe + 300-clip stats)
+
+# Phase 0b — add the longitudinal corpus to the T-SSL pre-training pool
+# (longitudinal manifest -> concat with the 75-speaker manifest -> combined grayscale stats)
+bash dev_artiJEPA/scripts/01b_prepare_longitudinal.sh   # builds manifest_combined.csv
 
 # Fast end-to-end validation (CPU/GPU, ViT-tiny, 2 steps)
 bash dev_artiJEPA/scripts/02_smoke.sh
@@ -81,13 +95,14 @@ rolling `latest.pt`. (If a hard kill ever lands during the rename, recover with
 | Plan | Where |
 |---|---|
 | A.1 intensity norm (percentile clip + per-clip z-score, rtMRI stats) | `rtmri_dataset.py::_intensity_norm`, `compute_stats.py` |
-| A.2 temporal 83.28→`target_fps` (default 25) **linear interpolation in the dataloader** | `rtmri_dataset.py::_sample_source_indices` / `_load_clip` |
+| A.2 temporal 83.28→`target_fps` (default 50) **linear interpolation in the dataloader** | `rtmri_dataset.py::_sample_source_indices` / `_load_clip` |
 | A.2 sampling: `crop` (one window/video) or **`tile`** (whole video @`target_fps` split into `frames_per_clip` chunks → full coverage) | `rtmri_dataset.py::_build_tile_index` / `_tile_indices` |
 | A.3 spatial 84→256/128 (bicubic) or →96 (reflect-pad) | `rtmri_dataset.py::_spatial` |
 | A.4 grayscale→3-channel replicate | `rtmri_dataset.py::_load_clip` |
 | A.6 even-length clips, random temporal crop | `PreprocConfig`, `_sample_source_indices` |
 | A.7 anatomically-safe aug (no hflip/rotation/colour) | `rtmri_dataset.py::_augment` |
 | A.8 subject-disjoint splits | `splits.py` |
+| A.8 **longitudinal corpus** added to the T-SSL pool (build → concat → leakage-guarded merge) | `build_manifest_longitudinal.py`, `merge_manifests.py`, `scripts/01b_prepare_longitudinal.sh` |
 | A.9 config template | `configs/preprocess.yaml` |
 | B.1 ViT-L backbone, pretrained init | `model.py`, `checkpoint.py` |
 | B.3 T-SSL (EMA target, L1 feature loss, multiblock masks **re-tuned per grid**) | `tssl_train.py`, `masking.py` |
@@ -108,11 +123,12 @@ in `…/eval/phoneme_*.json`; cached features in `…/feat_cache/phoneme/`.
 
 ## Temporal sampling (`crop` vs `tile`)
 
-The T-SSL configs default to **25 fps + `sampling: tile`**: each video is
-resampled onto a uniform 25 Hz grid and cut into consecutive, non-overlapping
-`frames_per_clip` (32-frame = 1.28 s) chunks, every chunk an independent training
-clip. This gives **full temporal coverage** (mean 23.7 chunks/video → 42,415 train
-clips) instead of one random 32-frame window per video (`sampling: crop`). Tile
+The primary 256px T-SSL config uses **50 fps + `sampling: tile`**: each video is
+resampled onto a uniform 50 Hz grid and cut into consecutive, non-overlapping
+`frames_per_clip` (32-frame = 0.64 s) chunks, every chunk an independent training
+clip. This gives **full temporal coverage** (mean 47.4 chunks/video → 85,636 train
+clips, ~2× the 25 fps grid's 42,415; the 128px ablation stays at 25 fps) instead of
+one random 32-frame window per video (`sampling: crop`). Tile
 mode reads `n_frames`/`fps` from the manifest, so build it with
 `build_manifest --probe`. The phoneme eval also tiles (per-token labels reassembled
 per utterance for PER); the collapse-monitor loader stays on `crop`.
@@ -123,11 +139,31 @@ diagnostics/checkpoint cadence stay meaningful; bound wall-clock with `--max-ste
 
 ## Notes / next steps
 
+- **Combined pre-training pool (rtMRI-75 + longitudinal) — `tssl_vitl_256_combined.yaml`.**
+  `manifest_combined.csv` = `manifest_alltrain.csv` (75-speaker, 2,371 clips) **+**
+  `manifest_longitudinal.csv` (21 disjoint speakers, 7,110 clips), all `split=train`.
+  On the 50 fps / 32-frame tile grid this is **343,517 train chunks** (236k
+  longitudinal + 107k 75-speaker, ~4× the 85.6k 75-speaker-only). The held-out
+  collapse monitor stays on the 75-speaker `val` (longitudinal has no val), and the
+  phoneme eval is unchanged (75-speaker / `usc_lss`). Combined grayscale stats are
+  ≈(0, 1) — identical to 75-speaker-only, since A.1 per-clip z-score dominates. Build
+  it with `scripts/01b_prepare_longitudinal.sh`. The combined config runs **215
+  epochs** (= ~10 passes / ~99.995% chunk coverage; schedule horizon `125×215 =
+  26,875` optimizer-updates) into a **separate run folder** (`runs/tssl_vitl_256_combined`),
+  so the **without-longitudinal baseline** — `tssl_vitl_256.yaml` (75-speaker pool,
+  50 epochs, `runs/tssl_vitl_256`) and its existing checkpoint — is left intact for the
+  with/without-longitudinal ablation. Launch:
+  ```bash
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+    bash dev_artiJEPA/scripts/03_train_tssl.sh dev_artiJEPA/configs/tssl_vitl_256_combined.yaml
+  # ~1.7 h/epoch on a V100 (~12.5 s/micro-step) -> spans multiple allocations;
+  # resumes each epoch:  ... --resume runs/tssl_vitl_256_combined/latest.pt
+  ```
 - **fp16 vs bf16:** the V100 (Volta) has no bf16 tensor cores → T-SSL configs use
   `dtype: float16` + GradScaler; on the L40S/Ampere+ switch to `bfloat16` (the
   phoneme eval already uses bf16).
-- Effective batch: bump `batch_size` + add gradient accumulation for the 256px run;
-  128px already fits a larger batch.
+- Effective batch: the 256px run uses `effective_batch: 128` (micro-batch 32 +
+  grad-accum ×4); 128px already fits a larger batch.
 - **Headline (UPDATED 2026-06-10, gold OOD speaker, 128px): use the SPATIAL probe.**
   The default probe mean-pools the spatial tokens — that discards *where* in the
   vocal tract the signal sits, which is the phonetic information. With the
@@ -138,10 +174,12 @@ diagnostics/checkpoint cadence stay meaningful; bound wall-clock with `--max-ste
   V-JEPA" was a probe artifact, not a resolution gap. Reproduce:
   `bash scripts/07_probe_spatial.sh`. The 128px T-SSL run was collapse-free
   (effective_rank 79→102).
-- **256px T-SSL is now RUNNING** on the V100 at **batch 32** (~0.39 s/clip, ~87 h /
+- **256px T-SSL** runs on the V100 at **micro-batch 32** (~0.39 s/clip, ~87 h /
   25k micro-steps, resumable each epoch; ~24.5/32 GB VRAM). **Activation checkpointing
   is mandatory at 256px** (no-ckpt OOMs even at bs8); bs32+ckpt is the speed/VRAM sweet
-  spot (bs64 OOMs), and keeps `eff_batch=64`/`oue=250` so resume is unchanged. Launch with
+  spot (bs64 OOMs). The config now uses `eff_batch=128`/`oue=125` (grad-accum ×4) on the
+  50 fps / 85,636-chunk grid — start a **fresh run** (the schedule horizon changed, so it
+  is *not* resume-compatible with old `eff_batch=64`/`oue=250` checkpoints). Launch with
   `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. Resume with
   `--resume runs/tssl_vitl_256/latest.pt`; eval intermediate checkpoints with
   `scripts/07_probe_spatial.sh dev_artiJEPA/configs/eval_phoneme_usc_lss_256.yaml`.

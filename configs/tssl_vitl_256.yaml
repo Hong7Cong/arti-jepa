@@ -12,13 +12,17 @@ meta:
   snapshot_freq: null     # if set, also keep epoch_NN.pt every N epochs (history)
 
 data:
-  manifest: /scratch1/hongn/artijepa/manifest_split.csv
+  # 75-speaker only -- the WITHOUT-longitudinal baseline (matches the ep50
+  # checkpoint in runs/tssl_vitl_256). WITH-longitudinal arm =
+  # configs/tssl_vitl_256_combined.yaml (manifest_combined.csv,
+  # runs/tssl_vitl_256_combined, epochs 215).
+  manifest: /scratch1/hongn/artijepa/manifest_alltrain.csv  # all-data pretrain (val 0.05 / test 0; 71 train + 4 val subjects)
   grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
   spatial_size: 256
   spatial_mode: resize
   frames_per_clip: 32
-  target_fps: 25.0        # 1.28 s / 32-frame chunk
-  sampling: tile          # resample whole video @25fps, split into 32f chunks (~23.5/vid -> 42k train chunks)
+  target_fps: 50.0        # 0.64 s / 32-frame chunk
+  sampling: tile          # resample whole video @50fps, split into 32f chunks (~47/vid -> ~85k train chunks, ~2x vs 25fps)
   tubelet_size: 2
   patch_size: 16
   intensity_norm: zscore
@@ -26,7 +30,7 @@ data:
   batch_size: 32          # micro-batch. V100-32GB: act-ckpt is MANDATORY at 256px
                           # (no-ckpt OOMs even at bs8 -- target sees all 4096 tokens).
                           # bs32+ckpt = ~20 GB peak, ~13% faster/clip than bs8 (better
-                          # GPU efficiency); bs64 OOMs. accum=eff/bs=2, oue unchanged.
+                          # GPU efficiency); bs64 OOMs. accum=eff/bs=4 (eff_batch 128).
   probe_batch_size: 8     # batch for the held-out collapse-monitor loader
   num_workers: 2   # the SLURM job is capped at 16 GB host RAM; 256px clips are 4x
   pin_mem: false   # bigger than 128px, so pinned workers OOM'd the cgroup -> 2, no pin
@@ -46,10 +50,9 @@ loss:
 optimization:
   epochs: 50              # data-bounded; early-stop on collapse/plateau
   ipe: 500                # micro-batches/epoch: 500 x bs32 = 16k chunks/epoch (kept
-                          #   constant); /accum 2 -> 250 optimizer-updates/epoch (oue
-                          #   unchanged vs bs8/ipe2000, so resume + schedules are identical)
-  effective_batch: 64     # grad-accum: accum_steps = effective_batch / batch_size = 2
-                          #   schedules step per optimizer-update; eff_batch fixed at 64
+                          #   constant); /accum 4 -> 125 optimizer-updates/epoch (oue)
+  effective_batch: 128    # grad-accum: accum_steps = effective_batch / batch_size = 4
+                          #   schedules step per optimizer-update; eff_batch fixed at 128
   lr: 5.0e-4              # cosine; lower than the 5.25e-4 large-batch pretrain default
   start_lr: 1.0e-4
   final_lr: 1.0e-5

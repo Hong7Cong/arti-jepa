@@ -23,8 +23,10 @@ def assign_splits(subjects, val_frac, test_frac, seed):
     rng = random.Random(seed)
     rng.shuffle(subjects)
     n = len(subjects)
-    n_test = max(1, round(n * test_frac))
-    n_val = max(1, round(n * val_frac))
+    # frac > 0 always lands at least 1 subject in the split; frac == 0 yields a
+    # true empty split (e.g. --val-frac 0 --test-frac 0 -> all data in train).
+    n_test = max(1, round(n * test_frac)) if test_frac > 0 else 0
+    n_val = max(1, round(n * val_frac)) if val_frac > 0 else 0
     test = set(subjects[:n_test])
     val = set(subjects[n_test:n_test + n_val])
     train = set(subjects[n_test + n_val:])

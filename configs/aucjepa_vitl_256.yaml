@@ -1,0 +1,84 @@
+# AC-JEPA-audio: frozen (T-SSL) ViT-L encoder + audio-conditioned predictor, 256px/32f.
+# Primary config (plans_aucjepa.md §7). Encoder is FROZEN -> no backward through it,
+# so VRAM is far lower than T-SSL and batch can be larger.
+meta:
+  folder: /scratch1/hongn/artijepa/runs/aucjepa_vitl_256
+  seed: 0
+  dtype: float16          # V100/P100 -> fp16 + GradScaler (Ampere+ -> bfloat16)
+  eval_freq: 1
+  save_freq: 1
+  probe_max_batches: 8    # val batches for the audio real-vs-shuffled diagnostic
+  max_steps: null
+  resume: null
+  snapshot_freq: null
+
+data:
+  manifest: /scratch1/hongn/artijepa/manifest_alltrain.csv
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 50.0        # 0.64 s / 32-frame chunk; T'=16 temporal tokens
+  sampling: tile          # REQUIRED by RTMRIAudioDataset (one (clip,chunk) per item)
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  augment: true
+  batch_size: 4           # benchmarked (2026-06-23): run is COMPUTE-bound, not memory-
+                          # bound -- batch 16 gave identical throughput (0.945 vs 0.924
+                          # clips/s). Fastest viable = batch 4 WITHOUT activation ckpt
+                          # (1.070 clips/s, 1.16x): removes the ~30% recompute. batch>=6
+                          # no-ckpt OOMs. accum 32 -> eff 128. ~28GB, deterministic shapes.
+  num_workers: 2          # was 4: cgroup --mem=32G OOM-killed a DataLoader worker at
+                          # epoch 5 (anon+shmem creep over epochs + page cache from video
+                          # decode). Fewer workers + non-persistent (below) caps host RAM.
+  pin_mem: false          # was true: pinned RAM is non-reclaimable; we're compute-bound
+                          # (3.7s/step) so the host->GPU copy speedup is irrelevant here.
+
+audio:                    # WavLM cache (build_audio_features.py)
+  model_name: microsoft/wavlm-base-plus
+  layer: -1
+  dim: 768                # A; must match cache meta.json
+  cache_dir: /scratch1/hongn/artijepa/audio_feats/wavlm_base_plus
+  pool: mean
+  normalize: zscore       # per-dim z-score with corpus stats | none
+  speaker: false
+  online: false
+
+objective: temporal
+ctx_frames: 8             # informational; the droid recipe predicts every next frame
+predictor:
+  kind: ac_audio          # state=e[t], action=e[t+1]-e[t]; AC predictor verbatim
+  pred_depth: 12
+  pred_embed_dim: 384
+  pred_num_heads: 12
+  use_rope: true
+  frame_causal: true
+
+model:
+  model_name: vit_large
+  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256/latest.pt
+  checkpoint_key: target_encoder
+  use_activation_checkpointing: false   # OFF at batch 4: the rollout graph fits in ~28GB
+                          # and we save the ~30% recompute (compute-bound -> direct speedup).
+                          # NOTE: must be TRUE if you raise batch_size >= 6 (else OOM at 256px).
+
+loss:
+  loss_exp: 1.0
+
+optimization:
+  epochs: 20              # "first result" run (full cosine anneal by ep20, ~2 days
+                          # on the V100); resume/extend later if loss+audio_gap still improving.
+  ipe: 2000               # batch 4 -> accum 32; ipe 2000 keeps oue=62/epoch (eff batch 128),
+                          # so T_max=1240 is unchanged and the epoch-1 resume fast-forward lines up.
+  effective_batch: 128    # grad-accum: accum = effective_batch / batch_size = 16
+  auto_steps: 2           # teacher-forced + 1 autoregressive step
+  lr: 5.0e-4
+  start_lr: 1.0e-4
+  final_lr: 1.0e-5
+  warmup: 2               # 10% of 20 epochs (keeps the 50ep config's warmup *shape*)
+  weight_decay: 0.04
+  final_weight_decay: 0.04
+  ipe_scale: 1.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8

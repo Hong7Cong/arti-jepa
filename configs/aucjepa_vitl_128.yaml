@@ -1,0 +1,72 @@
+# AC-JEPA-audio: cheaper 128px/32f ablation + smoke config (fits the Tesla P100-16GB).
+# Frozen encoder -> low VRAM; good for the overfit smoke test (plans_aucjepa.md §9 step 5).
+meta:
+  folder: /scratch1/hongn/artijepa/runs/aucjepa_vitl_128
+  seed: 0
+  dtype: float16
+  eval_freq: 1
+  save_freq: 1
+  probe_max_batches: 8
+  max_steps: null
+  resume: null
+  snapshot_freq: null
+
+data:
+  manifest: /scratch1/hongn/artijepa/manifest_alltrain.csv
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats_128.json
+  spatial_size: 128
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 25.0        # 1.28 s / 32-frame chunk; T'=16 temporal tokens
+  sampling: tile
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  augment: true
+  batch_size: 8           # P100-16GB; frozen encoder fwd under no_grad is cheap
+  num_workers: 2
+  pin_mem: true
+
+audio:
+  model_name: microsoft/wavlm-base-plus
+  layer: -1
+  dim: 768
+  cache_dir: /scratch1/hongn/artijepa/audio_feats/wavlm_base_plus
+  pool: mean
+  normalize: zscore
+  speaker: false
+  online: false
+
+objective: temporal
+ctx_frames: 8
+predictor:
+  kind: ac_audio
+  pred_depth: 12
+  pred_embed_dim: 384
+  pred_num_heads: 12
+  use_rope: true
+  frame_causal: true
+
+model:
+  model_name: vit_large
+  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256/latest.pt
+  checkpoint_key: target_encoder
+  use_activation_checkpointing: false
+
+loss:
+  loss_exp: 1.0
+
+optimization:
+  epochs: 50
+  ipe: 500
+  effective_batch: 64     # accum = 64/8 = 8
+  auto_steps: 2
+  lr: 5.0e-4
+  start_lr: 1.0e-4
+  final_lr: 1.0e-5
+  warmup: 5
+  weight_decay: 0.04
+  final_weight_decay: 0.04
+  ipe_scale: 1.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
