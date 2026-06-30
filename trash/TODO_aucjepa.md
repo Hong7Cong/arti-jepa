@@ -81,6 +81,9 @@ so within-speaker shuffle is "plausible" audio (smaller penalty), frozen feature
 | `configs/aucjepa_vitl_256.yaml` / `aucjepa_vitl_128.yaml` | ✅ |
 | `scripts/08_build_audio_feats.sh` / `09_train_aucjepa.sh` | ✅ |
 | `tests/test_aucjepa_smoke.py` | ✅ (18/18 checks pass) |
+| `artijepa/aucjepa_train_ddp.py` (DDP trainer, both GPUs) | ✅ |
+| `configs/aucjepa_vitl_256_ddp.yaml` / `aucjepa_vitl_128_ddp.yaml` | ✅ |
+| `scripts/10_train_aucjepa_ddp.sh` (torchrun launcher) | ✅ |
 
 ## Design decisions locked (plan §0 defaults)
 - Trainable = AC predictor + its state/action Linear projections only; encoder + target **frozen**.
@@ -106,6 +109,12 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 #    resume:       ... --resume /scratch1/hongn/artijepa/runs/aucjepa_vitl_128/latest.pt
 #    256px primary (needs a faster GPU than the P100): aucjepa_vitl_256.yaml
 
+# 1b. MULTI-GPU (DDP) -- BOTH GPUs via torchrun (one process/GPU, NCCL). Independent
+#     of the single-GPU trainer; checkpoints are interchangeable (unwrapped predictor).
+bash dev_artiJEPA/scripts/10_train_aucjepa_ddp.sh dev_artiJEPA/configs/aucjepa_vitl_256_ddp.yaml
+#    auto-detects GPUs from CUDA_VISIBLE_DEVICES; 128px DDP: aucjepa_vitl_128_ddp.yaml
+#    resume:  ... aucjepa_vitl_256_ddp.yaml --resume /scratch1/hongn/artijepa/runs/aucjepa_vitl_256_ddp/latest.pt
+
 # smoke test (CPU, no GPU/transformers needed): 19/19 checks
 PYTHONPATH=.:dev_artiJEPA python dev_artiJEPA/tests/test_aucjepa_smoke.py
 ```
@@ -128,6 +137,36 @@ scaler/epoch — resumable; encoder NOT stored, reloaded frozen from `model.chec
       it (`use_extrinsics`/`spk_dim`); not yet wired into the dataset/train loop.
 
 ## Notes / decisions log
+- (2026-06-25) **Multi-GPU (DDP) 256px run RUNNING on 2x Tesla P100-16GB** ->
+  `runs/aucjepa_vitl_256_ddp` (SEPARATE from the V100 `runs/aucjepa_vitl_256`).
+  New independent path: `aucjepa_train_ddp.py` (torchrun/NCCL, frozen encoder
+  replicated per rank, only the AC predictor DDP-wrapped via a `forward`->
+  `forward_predictions` shim so grad-sync arms; `DistributedSampler`; rank-0-only
+  log/diag/ckpt; checkpoints store the *unwrapped* predictor -> 1:1 interchangeable
+  with `aucjepa_train.py`). `aucjepa_vitl_256_ddp.yaml`: **batch 2/gpu x world 2 =
+  global 4** (== the V100 batch-4 trajectory), eff_batch 128 (accum auto = 32), oue
+  62/epoch.
+  **THE non-obvious DDP gotcha — `static_graph=True` is REQUIRED:** `VisionTransformer
+  PredictorAC` ALWAYS constructs an `extrinsics_encoder` that is UNUSED when
+  `use_extrinsics=False`, AND the predictor backbone is invoked 9x/step (1 TF + 8 AR
+  rollout). With a plain reducer DDP raises "Expected to have finished reduction... params
+  not used in producing loss" *at the first all-reduce* (it surfaced at the accum
+  boundary because `no_sync()` had suppressed reduction earlier). `static_graph=True`
+  records the (deterministic tile-sampled) graph once -> tolerates unused params +
+  repeated module calls + non-reentrant ckpt, and keeps `extrinsics_encoder` trainable
+  so optimizer param-groups still match the single-GPU trainer. NB static_graph does
+  NOT compose with `no_sync()`, so the trainer all-reduces every micro-step (negligible;
+  compute-bound). `init_process_group(device_id=...)` binds rank->GPU.
+  **256px on Pascal is COMPUTE-bound (both GPUs ~100%), so VRAM/batch does NOT speed it
+  up** (V100 bench: batch 8->16 = same throughput). Measured peaks: act-ckpt **ON ~3.5 GB**
+  (safe) vs **OFF ~14.8 GB** (near-max on 16 GB; AdamW state allocates ~+0.2 GB at the 1st
+  optimizer boundary -> watch it there). ckpt-OFF skips the recompute -> **~14.25 s/step
+  (~11% faster than ckpt-ON's 16 s)** -- the ONLY VRAM-for-speed lever; the 8-step AR
+  rollout is what makes it slow, not memory. **Launched as a PROBE: ckpt OFF + 6 epochs
+  (~7.9 h/epoch -> ~2 days), loss dropping, fits 16 GB.** Resumable per-epoch (spans
+  allocations): `bash scripts/10_train_aucjepa_ddp.sh dev_artiJEPA/configs/aucjepa_vitl_256_ddp.yaml
+  --resume runs/aucjepa_vitl_256_ddp/latest.pt`. Faster turnaround = 128px DDP
+  (`aucjepa_vitl_128_ddp.yaml`, ~1/4 the tokens) or flip ckpt ON + 20 ep for the safe long run.
 - (2026-06-24) **cgroup OOM at epoch 5** (NOT GPU): the salloc was `--mem=32G`; a
   DataLoader worker's anon/shmem crept over epochs (+ page cache from decoding 2371
   videos) and SIGKILLed at the epoch-5 `torch.save` spike (`Killed`, no traceback;

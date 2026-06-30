@@ -1,0 +1,98 @@
+# AC-JEPA-audio, MULTI-GPU (DDP) @ 256px/32f -- rtMRI-75 + WavLM, frozen T-SSL encoder.
+# Driven by scripts/10_train_aucjepa_ddp.sh -> artijepa.aucjepa_train_ddp via torchrun.
+#
+# HARDWARE NOTE: the 256px AC run lived on a 32 GB V100 (~25-28 GB at batch 4, no
+# activation ckpt). DDP is DATA-parallel -> the full 256px graph is REPLICATED on
+# every GPU, so per-GPU memory is unchanged. On 2x Tesla P100-16GB it must run at a
+# small per-GPU batch WITH activation checkpointing to fit 16 GB.
+#
+# This mirrors the V100 batch-4 trajectory across 2 GPUs:
+#   batch_size 2/gpu * world 2 = global micro-batch 4 (== the V100 single-GPU batch),
+#   accum = effective_batch / (batch_size*world_size) = 128/(2*2) = 32, oue=62,
+#   data/epoch = ipe*bs*world = 2000*2*2 = 8000 views -- identical to the V100 run.
+# => same eff_batch / oue / per-epoch data as the V100 run, just split over 2 weaker GPUs.
+#
+# PROBE MODE (2026-06-25): activation-ckpt OFF + epochs 6 (~1.5-2 days) to get an early
+# audio_gap signal fast. ckpt-OFF trades the safe 3.5 GB for ~14.6 GB (near-max VRAM) and
+# ~20% faster steps -- 256px on Pascal is compute-bound (both GPUs 100%), so batch/VRAM
+# alone won't speed it up; skipping recompute is the only VRAM-for-speed lever. If the 1st
+# optimizer boundary OOMs, drop batch_size to 1 (accum auto-rises to 64; same throughput).
+meta:
+  folder: /scratch1/hongn/artijepa/runs/aucjepa_vitl_256_ddp   # SEPARATE from the V100 run folder
+  seed: 0
+  dtype: float16          # P100 (no bf16 tensor cores) -> fp16 + GradScaler
+  eval_freq: 1
+  save_freq: 1
+  probe_max_batches: 8    # rank-0 val batches for the audio real-vs-shuffled diagnostic
+  max_steps: null
+  resume: null
+  snapshot_freq: null
+
+data:
+  manifest: /scratch1/hongn/artijepa/manifest_alltrain.csv     # rtMRI-75 (train 2243 / val 128)
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json  # ~(0,1); per-clip z-score dominates
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 50.0        # 0.64 s / 32-frame chunk; T'=16 temporal tokens
+  sampling: tile          # REQUIRED by RTMRIAudioDataset (one (clip,chunk) per item)
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  augment: true
+  batch_size: 2           # PER-GPU. 2*world(2)=4 global == V100 batch. With act-ckpt ON
+                          # fits ~16 GB; if OOM at runtime, set to 1 (accum auto-rises to 64).
+  num_workers: 2          # PER-RANK. 2 ranks * 2 = 4 worker procs; job cgroup is --mem=32G
+                          # (this is the cap that OOM-killed the 256 single-GPU run at ep5).
+  pin_mem: false          # pinned RAM is non-reclaimable; compute-bound -> buys nothing
+  persistent_workers: false  # respawn per epoch releases worker anon/shmem creep
+
+audio:                    # WavLM cache (build_audio_features.py); full 2371-clip corpus cached
+  model_name: microsoft/wavlm-base-plus
+  layer: -1
+  dim: 768                # A; must match cache meta.json
+  cache_dir: /scratch1/hongn/artijepa/audio_feats/wavlm_base_plus
+  pool: mean
+  normalize: zscore       # per-dim z-score with corpus stats
+  speaker: false
+  online: false
+
+objective: temporal
+ctx_frames: 8             # context-prefix AR rollout: seed 8 real frames, predict the rest
+                          # from audio only -> makes the acoustics causally necessary (plan §4)
+predictor:
+  kind: ac_audio          # state=e[t], action=e[t+1]-e[t]; AC predictor (src/) verbatim
+  pred_depth: 12
+  pred_embed_dim: 384
+  pred_num_heads: 12
+  use_rope: true
+  frame_causal: true
+
+model:
+  model_name: vit_large
+  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256/latest.pt   # T-SSL ViT-L @256px (ep50, κ 0.530)
+  checkpoint_key: target_encoder
+  use_activation_checkpointing: false   # PROBE: OFF -> uses ~14.6 GB (near-max VRAM on the 16 GB
+                          # P100) and skips the ~30% recompute (~20% faster/step). Margin is TIGHT
+                          # (~1.4 GB; AdamW state adds ~0.2 GB at the 1st optimizer boundary) -> if it
+                          # OOMs, drop batch_size to 1 (accum auto-rises to 64). Turn ON (3.5 GB) for a
+                          # safe long run.
+
+loss:
+  loss_exp: 1.0
+
+optimization:
+  epochs: 6               # PROBE: short run (~1.5-2 days on 2xP100); diagnostics + audio_gap land
+                          # every epoch. Resume/extend with --resume if the signal looks good.
+  ipe: 2000               # micro-steps/rank/epoch; accum=128/(2*2)=32 -> oue=62, T_max=372
+  effective_batch: 128    # GLOBAL optimizer batch (batch_size * world_size * accum)
+  auto_steps: 2           # teacher-forced + 1 AR step (used only when ctx_frames is null)
+  lr: 5.0e-4              # tuned for eff_batch 128 -> unchanged (eff_batch preserved under DDP)
+  start_lr: 1.0e-4
+  final_lr: 1.0e-5
+  warmup: 1               # ~17% of the 6-epoch horizon (warmup shape for the short probe)
+  weight_decay: 0.04
+  final_weight_decay: 0.04
+  ipe_scale: 1.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8

@@ -1,0 +1,77 @@
+# Articulator-Conditioned JEPA, DDP @256px/32f -- HARD-CONDITIONING variant (plan §8 fix A).
+# Identical to acjepa_arti6_256_ddp.yaml EXCEPT ctx_frames: 2 (was 8) and a separate run
+# folder. Goal: force the predictor to USE the articulators. With ctx_frames=2 the AR branch
+# seeds only 2 real frames (40 ms) and predicts the remaining 14 of T'=16 tokens (~280 ms)
+# from arti-6 alone -> over that long arti-only horizon, frame-dynamics extrapolation decays,
+# so the articulators become the dominant signal. Watch `arti_gap` in diagnostics.jsonl: it
+# should grow well above the ~5e-4 plateau the ctx_frames=8 run hit (runs/acjepa_arti6_256_ddp,
+# stopped @ ep8, arti_gap ~0.1-0.2% of AR L1 -> model ignored arti).
+#
+# COST: 1 TF + 14 AR = 15 backbone calls/step (was 9) -> ~1.6x slower (~25 s/step, ~7 h/epoch).
+# act-ckpt ON keeps it within the 16 GB P100s (recompute bounds the longer rollout's activation
+# memory); if the 1st optimizer boundary OOMs, drop batch_size to 1 (accum auto-rises to 64).
+meta:
+  folder: /scratch1/hongn/artijepa/runs/acjepa_arti6_256_ctx2_ddp   # SEPARATE from the ctx=8 baseline
+  seed: 0
+  dtype: float16
+  eval_freq: 1
+  save_freq: 1
+  probe_max_batches: 8
+  max_steps: null
+  resume: null
+  snapshot_freq: null
+
+data:
+  manifest: /scratch1/hongn/artijepa/arti_manifest.csv
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 100.0
+  sampling: tile
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  augment: true
+  batch_size: 2             # PER-GPU. 2*world(2)=4 global. If OOM at the 1st opt boundary -> 1.
+  num_workers: 2
+  pin_mem: false
+  persistent_workers: false
+
+arti:
+  dim: 6
+  cache_dir: /scratch1/hongn/artijepa/arti_feats/usc_lss
+  normalize: zscore
+
+objective: temporal
+ctx_frames: 2             # <-- THE CHANGE (was 8): seed 2 real frames, predict 14 from arti only
+predictor:
+  kind: ac_arti
+  pred_depth: 12
+  pred_embed_dim: 384
+  pred_num_heads: 12
+  use_rope: true
+  frame_causal: true
+
+model:
+  model_name: vit_large
+  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256/latest.pt
+  checkpoint_key: target_encoder
+  use_activation_checkpointing: true    # ON for 16 GB P100s (longer AR rollout -> more activations)
+
+loss:
+  loss_exp: 1.0
+
+optimization:
+  epochs: 20
+  ipe: 1000                 # micro-steps/rank/epoch; accum=128/(2*2)=32 -> oue=31
+  effective_batch: 128
+  auto_steps: 2             # ignored while ctx_frames is set (context-prefix path)
+  lr: 5.0e-4
+  start_lr: 1.0e-4
+  final_lr: 1.0e-5
+  warmup: 2
+  weight_decay: 0.04
+  final_weight_decay: 0.04
+  ipe_scale: 1.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8

@@ -1,0 +1,88 @@
+# AC-JEPA-audio, MULTI-GPU (DDP) @ 128px/32f -- rtMRI-75 + WavLM, frozen T-SSL encoder.
+# Driven by scripts/10_train_aucjepa_ddp.sh -> artijepa.aucjepa_train_ddp via torchrun.
+#
+# Why 128px (not the 256 primary): the only free GPUs here are 2x Tesla P100-16GB.
+# The 256px AC run needs ~25-28 GB (it lived on the 32 GB V100) -> OOMs on a 16 GB
+# P100. 128px is the smoke-validated P100 fit (batch 8). DDP replicates the frozen
+# encoder per rank (no grad/no sync) and gradient-syncs ONLY the AC predictor.
+#
+# Schedule is kept IDENTICAL to the single-GPU 128 run, just parallelised:
+#   effective_batch (64) is the GLOBAL optimizer batch = batch_size(8) * world(2) *
+#   accum(4). The trainer derives accum = effective_batch / (batch_size*world_size),
+#   so per-update LR/WD is unchanged. With epochs=25 the run sees the same total
+#   data (25*ipe*bs*world = 200k views) and #updates (25*125=3125) as the single-GPU
+#   50-epoch run (50*500*8 views, 50*62 updates) -- same experiment, ~2x faster.
+meta:
+  folder: /scratch1/hongn/artijepa/runs/aucjepa_vitl_128_ddp   # separate from the smoke run
+  seed: 0
+  dtype: float16          # P100 (no bf16 tensor cores) -> fp16 + GradScaler
+  eval_freq: 1
+  save_freq: 1
+  probe_max_batches: 8    # rank-0 val batches for the audio real-vs-shuffled diagnostic
+  max_steps: null
+  resume: null
+  snapshot_freq: null
+
+data:
+  manifest: /scratch1/hongn/artijepa/manifest_alltrain.csv     # rtMRI-75 (train 2243 / val 128)
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json  # ~(0,1); per-clip z-score dominates
+  spatial_size: 128
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 25.0        # 1.28 s / 32-frame chunk; T'=16 temporal tokens
+  sampling: tile          # REQUIRED by RTMRIAudioDataset (one (clip,chunk) per item)
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  augment: true
+  batch_size: 8           # PER-GPU micro-batch (P100-16GB fit; frozen encoder fwd is no_grad)
+  num_workers: 2          # PER-RANK. 2 ranks * 2 = 4 worker procs; job cgroup is --mem=32G
+                          # (this is the cap that OOM-killed the 256 run). Drop to 1 if RAM tight.
+  pin_mem: false          # pinned RAM is non-reclaimable; we're compute-bound so it buys nothing
+  persistent_workers: false  # respawn per epoch releases the worker anon/shmem creep
+
+audio:                    # WavLM cache (build_audio_features.py); full 2371-clip corpus cached
+  model_name: microsoft/wavlm-base-plus
+  layer: -1
+  dim: 768                # A; must match cache meta.json
+  cache_dir: /scratch1/hongn/artijepa/audio_feats/wavlm_base_plus
+  pool: mean
+  normalize: zscore       # per-dim z-score with corpus stats
+  speaker: false
+  online: false
+
+objective: temporal
+ctx_frames: 8             # context-prefix AR rollout: seed 8 real frames, predict the rest
+                          # from audio only -> makes the acoustics causally necessary (plan §4)
+predictor:
+  kind: ac_audio          # state=e[t], action=e[t+1]-e[t]; AC predictor (src/) verbatim
+  pred_depth: 12
+  pred_embed_dim: 384
+  pred_num_heads: 12
+  use_rope: true
+  frame_causal: true
+
+model:
+  model_name: vit_large
+  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256/latest.pt   # T-SSL ViT-L (RoPE -> 128px-OK)
+  checkpoint_key: target_encoder
+  use_activation_checkpointing: false   # OFF at 128px (fits). If you turn it ON, the DDP
+                          # trainer auto-switches to reentrant-safe sync (static_graph) -- see code.
+
+loss:
+  loss_exp: 1.0
+
+optimization:
+  epochs: 25              # = single-GPU 50ep worth of data/updates at world=2 (see header)
+  ipe: 500                # micro-steps/rank/epoch; accum = 64/(8*2)=4 -> oue=125, T_max=3125
+  effective_batch: 64     # GLOBAL optimizer batch (batch_size * world_size * accum)
+  auto_steps: 2           # teacher-forced + 1 AR step (used only when ctx_frames is null)
+  lr: 5.0e-4              # tuned for eff_batch 64 -> unchanged (eff_batch preserved under DDP)
+  start_lr: 1.0e-4
+  final_lr: 1.0e-5
+  warmup: 2.5             # ~10% of 3125 updates (matches the single-GPU warmup shape)
+  weight_decay: 0.04
+  final_weight_decay: 0.04
+  ipe_scale: 1.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8

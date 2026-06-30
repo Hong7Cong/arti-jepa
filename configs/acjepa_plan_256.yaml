@@ -1,0 +1,56 @@
+# AC-JEPA planner config (aucjepa_plans_new.md §3-§5). Pure inference: CEM search over
+# articulator action sequences toward a goal phoneme, scored by an energy on the rolled-
+# out latent of the frozen world model P. Driven by scripts/14_plan_acjepa.sh ->
+# artijepa.acjepa_plan. Reuses the data/model blocks of the training config so the
+# encoder + dataset are built identically.
+meta:
+  seed: 0
+
+data:
+  manifest: /scratch1/hongn/artijepa/arti_manifest.csv
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 100.0
+  sampling: tile
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  augment: false
+
+arti:
+  dim: 6
+  cache_dir: /scratch1/hongn/artijepa/arti_feats/usc_lss
+  normalize: zscore
+
+predictor:
+  kind: ac_arti
+  pred_depth: 12
+  pred_embed_dim: 384
+  pred_num_heads: 12
+  use_rope: true
+  frame_causal: true
+
+model:
+  model_name: vit_large
+  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256/latest.pt
+  checkpoint_key: target_encoder
+  use_activation_checkpointing: false
+
+plan:
+  energy: arti_target       # arti_target (runnable now) | classifier | prototype
+  ctx_frames: 4             # real seed frames (more = easier); rest is planned
+  horizon: 12               # future frames to plan (T' - ctx_frames = 16 - 4)
+  lambda_arti: 0.0          # >0 adds the Energy-3 arti-target regulariser to 1/2
+  arti_target_table: /scratch1/hongn/artijepa/arti_feats/usc_lss/arti_targets.npy
+                            # [K,6] s*_p table (build via acjepa_energy.build_arti_targets
+                            # on cached arti-6 + gold phoneme labels -- needs M2 alignment)
+  # classifier_ckpt: ...    # for energy=classifier (the M2 phoneme head C)
+  # prototypes_npy: ...     # for energy=prototype ([K,hw,D] mu_p)
+
+cem:
+  M: 256                    # population size per CEM iteration
+  top_k: 32                 # elite set refit each iteration
+  n_iter: 8                 # CEM iterations
+  sigma0: 0.3               # initial action std (z-scored arti units)
+  a_clip: 1.0               # per-step velocity bound on |action| (z-scored units), or null
