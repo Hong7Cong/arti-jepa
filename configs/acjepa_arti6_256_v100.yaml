@@ -1,0 +1,73 @@
+# Articulator-Conditioned JEPA @256px/32f -- V100-32GB single-GPU, SPEED-TUNED.
+# Forked from acjepa_arti6_256.yaml. Bench (2026-06-30, V100-PCIE-32GB): the step is
+# COMPUTE-bound on the frozen ViT-L encoder forward -- throughput is ~1.0 clip/s flat
+# across batch 3..16 and both ckpt modes, so extra VRAM/batch buys nothing. The only
+# real speed lever is activation-checkpointing OFF (984 vs ~1080 ms/clip, ~9% faster);
+# recompute is pure overhead here. Batch 4 ckpt-off peaks ~24 GB on 32 GB (margin OK).
+# Dataloader tuned (8 workers, pinned, persistent) just to keep the GPU fed.
+#   bash scripts/12_train_acjepa.sh configs/acjepa_arti6_256_v100.yaml
+meta:
+  folder: /scratch1/hongn/artijepa/runs/acjepa_arti6_256_v100
+  seed: 0
+  dtype: float16
+  eval_freq: 1
+  save_freq: 1
+  probe_max_batches: 8
+  max_steps: null
+  resume: null
+  snapshot_freq: null
+
+data:
+  manifest: /scratch1/hongn/artijepa/arti_manifest.csv
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 100.0         # native rate -> frame-exact, no consonant aliasing (plan §1.1)
+  sampling: tile
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  augment: true
+  batch_size: 4             # ckpt-off ~24 GB at 256px; compute-bound so bigger != faster
+  num_workers: 8            # 28 CPUs free; keep the compute-bound GPU fed
+  pin_mem: true             # trainer uses non_blocking H2D copies
+  persistent_workers: true  # avoid re-spawning workers every epoch
+
+arti:
+  dim: 6
+  cache_dir: /scratch1/hongn/artijepa/arti_feats/usc_lss
+  normalize: zscore
+
+objective: temporal
+ctx_frames: 8
+predictor:
+  kind: ac_arti
+  pred_depth: 12
+  pred_embed_dim: 384
+  pred_num_heads: 12
+  use_rope: true
+  frame_causal: true
+
+model:
+  model_name: vit_large
+  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256/latest.pt   # T-SSL ViT-L @256 (ep50, κ 0.530)
+  checkpoint_key: target_encoder
+  use_activation_checkpointing: false   # OFF = fastest (compute-bound); ~24 GB at bs4
+
+loss:
+  loss_exp: 1.0
+
+optimization:
+  epochs: 20
+  ipe: 1000
+  effective_batch: 128
+  auto_steps: 2
+  lr: 5.0e-4
+  start_lr: 1.0e-4
+  final_lr: 1.0e-5
+  warmup: 2
+  weight_decay: 0.04
+  final_weight_decay: 0.04
+  ipe_scale: 1.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
