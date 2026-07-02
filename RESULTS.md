@@ -217,3 +217,26 @@ log table.
 > **NOTE — "baselines > V-JEPA" was a PROBE artifact, not resolution.** With the
 > spatial-aware probe, tssl_128 (κ 0.475) > supervised ViT-L/16 (0.368) at the
 > *same* 128px — the gap was the mean-pool probe discarding spatial structure.
+
+---
+
+## Task 8 — stuttering disfluency-type classification (infra 2026-06-30, results TBA)
+Segment-level disfluency-type classification from frozen (or fine-tuned) rtMRI
+features. Canonical setup = **attentive probe @ 256px, leave-one-speaker-out** over
+the 7 PWS speakers. Manifest `disfluency_manifest.csv` = 3130 segments (rep 795 /
+block 693 / pro 620 / osci 42 / other 21 / fluent 959). Primary metric **macro-F1**
+(severe imbalance) + balanced accuracy + confusion matrix, per held-out speaker and
+pooled. Pipeline validated end-to-end (`tests/test_disfluency_smoke.py` 21/21;
+tiny real-data frozen + finetune smoke on VideoMAE-base). Runs below are **TBA**.
+
+| encoder | mode | task | probe | res | macro-F1 | bal-acc |
+|---|---|---|---|---|---|---|
+| V-JEPA2 pretrained | frozen | type5 | attentive | 256 | **TBA** | TBA |
+| T-SSL 256 (`tssl256`) | frozen | type5 | attentive | 256 | **TBA** | TBA |
+| VideoMAE-L/16 | frozen | type5 | attentive | 224 | **TBA** | TBA |
+| VideoMAE-L/16 | fine-tune | type5 | attentive | 224 | **TBA** | TBA |
+| image baselines (vitl/…) | frozen | type5 | attentive | native | **TBA** | TBA |
+
+Also TBA: `type3` (block/rep/pro only) and the `binary` fluent-vs-disfluent
+baseline; the `disfluency2` (rep-heavy) tier as a secondary report. JSONs will
+persist to `eval/disfluency_*_s{seed}.json`.
