@@ -12,4 +12,4 @@ nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=cs
 
 # -u: unbuffered stdout so the redirected log is live (Python block-buffers stdout
 # to a file otherwise -> progress lines lag far behind the flushed train_log.csv).
-python -u -m artijepa.aucjepa_train --config "${CONFIG}" "$@"
+python -u -m artijepa.aai_train --config "${CONFIG}" "$@"

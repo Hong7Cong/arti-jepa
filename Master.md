@@ -52,6 +52,11 @@
 - `usc_lss.py` — OOD gold manifest builder + dataset (104×104→resize, 99→25 fps, per-token gold labels, tile+pad, PER reassembly).
 - `audio_phoneme.py` — Task-1 pseudo pipeline (ffmpeg 16 kHz → wav2vec2 CTC → `.npy`; `PseudoPhonemeDataset`). Model step blocked by env → decoupled.
 - `baselines.py` — public image models (timm: clip/siglip/dinov2/vitl/resnet) → tubelet-pool to V-JEPA grid → same probe; emits spatial patch grid when `pool_spatial=False`.
+- `videomae_baseline.py` — VideoMAE-L video baseline (transformers). Frozen `.backbone(clip)` (drop-in for the extractor) + fine-tunable `VideoMAEClassifier` (encoder+attentive/mean head).
+
+**Disfluency evaluation (Task 8 — stuttering)**
+- `stutter.py` — TextGrid parser + disfluency-type canonicalizer (typo/compound→bucket5) + manifest builder (disfluent events + fluent negatives, speaker col for LOSO) + segment dataset (uniform-sample clip per `[xmin,xmax]`) + macro-F1/balanced-acc/confusion metrics.
+- `eval_disfluency.py` — segment classification: freeze encoder (V-JEPA/T-SSL / image_baseline / videomae) → cached per-segment features → attentive `SegmentProbe` → LOSO macro-F1; `--mode finetune` trains VideoMAE end-to-end. Canonical = attentive @ 256px.
 
 **AC-JEPA track (separate — articulator-conditioned JEPA + planning)**
 - `arti_cache.py` — offline articulator (+MRI frame) cache from `usc_lss/articulators/*.mat` (arti-6, 100 Hz, frame-exact).
@@ -63,7 +68,7 @@
 
 ## Configs — `configs/`
 - T-SSL: `tssl_vitl_128.yaml`, `tssl_vitl_256.yaml`, `tssl_vitl_256_combined.yaml` (+longitudinal).
-- Eval: `eval_phoneme_usc_lss.yaml` (128), `eval_phoneme_usc_lss_256.yaml`, `eval_phoneme_usc_lss_baseline.yaml`, `eval_phoneme_pseudo.yaml`.
+- Eval: `eval_phoneme_usc_lss.yaml` (128), `eval_phoneme_usc_lss_256.yaml`, `eval_phoneme_usc_lss_baseline.yaml`, `eval_phoneme_pseudo.yaml`, `eval_disfluency.yaml` (Task 8, attentive @ 256px).
 - Misc: `preprocess.yaml`, `smoke.yaml`.
 - AC-JEPA: `acjepa_arti6_128.yaml`, `acjepa_arti6_256.yaml`, `acjepa_arti6_256_ddp.yaml`, `acjepa_plan_256.yaml`.
 
@@ -74,6 +79,8 @@
 - `03_train_tssl.sh` — T-SSL training (`--resume <ckpt>`, `--max-steps`).
 - `04_eval_phoneme.sh` — phoneme eval (`--encoder`, `--tag`, `--probe`).
 - `05_eval_baselines.sh` — public-model baselines.
+- `15_build_stutter_manifest.sh` — build the disfluency manifest (`--fluent-per-file N`).
+- `16_eval_disfluency.sh` — disfluency-type eval (`--encoder`/`--model videomae`/`--mode finetune`).
 - `06_probe_sweep.sh` — head×loss×encoder grid (cached features).
 - `07_probe_spatial.sh` — spatial-aware probes (tcn_spatial, attentive).
 - `11_build_arti_cache.sh`, `12_train_acjepa.sh`, `13_train_acjepa_ddp.sh`, `14_plan_acjepa.sh` — AC-JEPA track.

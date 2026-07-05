@@ -11,7 +11,7 @@ predict next-frame tokens conditioned on per-frame WavLM audio (``state=e[t]``,
 
 Run:
     source dev_artiJEPA/scripts/_env.sh
-    python -m artijepa.aucjepa_train --config dev_artiJEPA/configs/aucjepa_vitl_128.yaml
+    python -m artijepa.aai_train --config dev_artiJEPA/configs/aai_wavlm_256_combined_ctx2.yaml
 """
 
 import argparse
