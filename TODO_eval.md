@@ -79,7 +79,15 @@ manifest builder pairing the annotation with the paired rtMRI video; reuse the
 seconds-based alignment + frozen-encoder→per-token-feature path from
 `eval_phoneme.py`.
 
-### 8. Stuttering disfluency-type classification — **PIPELINE BUILT, RESULTS TBA**
+### 8. Stuttering disfluency-type classification — **⚠ INFRA MISSING FROM REPO (see note)**
+> **Reality-check (2026-07-05):** the files this section calls "Built/DONE"
+> (`artijepa/stutter.py`, `artijepa/eval_disfluency.py`, the VideoMAE fine-tune path,
+> `configs/eval_disfluency.yaml`, `scripts/15_build_stutter_manifest.sh`,
+> `scripts/16_eval_disfluency.sh`, `tests/test_disfluency_smoke.py`) are **not on disk
+> and never committed** (`git log --all` empty). The design below stands but the
+> pipeline must be (re)built before any run. Only the VideoMAE *frozen phoneme*
+> baseline was actually implemented — as `artijepa/videomae_baseline.py` for the
+> usc_lss phoneme eval (see the VideoMAE section below), not the disfluency task.
 Segment-level classification of **disfluency type** from frozen (or fine-tuned)
 rtMRI features. Infra landed 2026-06-30; the runs themselves are TBA.
 - **Data:** `/data1/span_data/stuttering/PWS{3,4,5,6,7,8,10}/textgrid/*.TextGrid`
@@ -218,22 +226,29 @@ drivers `scripts/05_eval_baselines.sh`, `eval/run_baselines_spatial.sh`.
 | dinov2-L/14 (DINOv3 unavailable) | 518 | ✅ κ 0.291 | ❌ REMOVE, NOT RUN |
 | resnet-50 | 224 | ✅ κ 0.304 | ❌ REMOVE, NOT RUN |
 
-## Video model baseline — VideoMAE (added 2026-06-30)
-`artijepa/videomae_baseline.py` (transformers `VideoMAEModel`, **video** 3-D tubelet
-encoder, not per-frame). The generic video-SSL competitor to Arti-JEPA's video-JEPA.
-Default `MCG-NJU/videomae-large` (ViT-L, D=1024, 16f, tubelet 2, patch 16 →
-8×14×14 tokens). Same input contract as the image baselines (minmax→[0,1] +
-ImageNet mean/std, resize 224). Native geometry (224px/16f) overrides the 256px
-config — that's the baseline's best shot. Two modes on the disfluency task:
+## Video model baseline — VideoMAE (phoneme eval, DONE 2026-07-05)
+`artijepa/videomae_baseline.py` (HF `VideoMAEModel`, **video** 3-D tubelet encoder,
+not per-frame) — the generic video-SSL competitor to Arti-JEPA's video-JEPA.
+`MCG-NJU/videomae-large` (ViT-L, D=1024, 16f, tubelet 2, patch 16 → 8×14×14 tokens).
+Wired into `eval_phoneme.py` via `--model videomae` (`encoder.type=videomae`); config
+`configs/eval_phoneme_usc_lss_videomae.yaml`; driver `scripts/19_eval_videomae.sh`.
+Input contract mirrors the image baselines (minmax→[0,1] + ImageNet mean/std,
+resize 224); native geometry (224px/**16f**, tubelet 2 → T'=8 tokens @ 80 ms) is
+enforced by `load_frozen_encoder` — the baseline's best shot. **Frozen only**
+(attentive spatial probe), 3 seeds, saved probe weights → see `RESULTS_usclss.md`.
 
-| model | mode | phoneme (usc_lss) | disfluency (Task 8) |
-|---|---|---|---|
-| VideoMAE-L/16 | **frozen** (attentive probe) | TBA (optional) | ❌ TBA |
-| VideoMAE-L/16 | **fine-tune** (encoder + head) | — | ❌ TBA |
+⚠ **Two env gotchas (handled in `videomae_baseline.py`, matter for repro):**
+1. transformers 5.x imports fail under this env's torch 2.6 (missing `float8_e8m0fnu`
+   dtype) → we alias the dtype and import `VideoMAEModel` from its submodule directly.
+2. transformers 5.x refactored VideoMAE self-attn to `query/key/value.bias`, so
+   `from_pretrained` **silently zero-inits** the biases and drops the checkpoint's
+   original `q_bias`/`v_bias` (‖q_bias‖≈18) → `_restore_attn_biases` copies them back
+   (key bias = 0, BEiT-style). Without this the encoder is NOT the true pretrained model.
 
-Frozen exposes `.backbone(clip)` (drop-in for the extractor); fine-tune trains the
-encoder end-to-end (`--mode finetune`, `encoder_lr` ≪ head `lr`). Run via
-`scripts/16_eval_disfluency.sh --model videomae [--mode finetune]`.
+**NOT in the repo (docs previously overstated):** the VideoMAE **fine-tune** path and
+the whole **disfluency Task 8** infra (`eval_disfluency.py`, `stutter.py`,
+`configs/eval_disfluency.yaml`, `scripts/15/16_eval_disfluency.sh`) referenced above
+were never committed and do not exist on disk — treat those rows as unbuilt.
 
 ---
 

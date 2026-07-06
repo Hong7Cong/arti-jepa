@@ -21,12 +21,16 @@ Companion: `RESULTS.md` (full project log), `TODO_eval.md` (eval plan).
 |---|---|---|---|---|---|---|
 | 1 | **tssl256comb100** (ckpt_100) | T-SSL, 75-spk **+ longitudinal** | **0.556 ± 0.003** | 0.469 | 0.571 | 0.574 |
 | 2 | tssl256 (75-only, re-run) | T-SSL, 75-spk | 0.538 ± 0.007 | 0.491 | 0.545 | 0.557 |
-| 3 | pretrained256 | V-JEPA2 stock (no T-SSL) | 0.449 ± 0.005 | 0.555 | 0.465 | 0.477 |
-| 4 | base: dinov2-L/14 | DINOv2 (image SSL) | 0.334 ± 0.005 | 0.635 | 0.352 | 0.361 |
-| 5 | base: **vit-L/16 sup** | ImageNet supervised | 0.331 ± 0.012 | 0.633 | 0.362 | 0.358 |
-| 6 | base: siglip-L/16 | SigLIP | 0.297 ± 0.008 | 0.662 | 0.312 | 0.327 |
-| 7 | base: clip-L/14 | CLIP | 0.285 ± 0.001 | 0.672 | 0.314 | 0.315 |
-| 8 | base: resnet-50 | ImageNet supervised | 0.270 ± 0.004 | 0.693 | 0.295 | 0.302 |
+| 3 | base: **VideoMAE-L/16** | VideoMAE (**video** SSL, 3-D) | 0.477 ± 0.012 | 0.528 | 0.504 | 0.498 |
+| 4 | pretrained256 | V-JEPA2 stock (no T-SSL) | 0.449 ± 0.005 | 0.555 | 0.465 | 0.477 |
+| 5 | base: dinov2-L/14 | DINOv2 (image SSL) | 0.334 ± 0.005 | 0.635 | 0.352 | 0.361 |
+| 6 | base: **vit-L/16 sup** | ImageNet supervised | 0.331 ± 0.012 | 0.633 | 0.362 | 0.358 |
+| 7 | base: siglip-L/16 | SigLIP (image) | 0.297 ± 0.008 | 0.662 | 0.312 | 0.327 |
+| 8 | base: clip-L/14 | CLIP (image) | 0.285 ± 0.001 | 0.672 | 0.314 | 0.315 |
+| 9 | base: resnet-50 | ImageNet supervised | 0.270 ± 0.004 | 0.693 | 0.295 | 0.302 |
+
+Rows 3–9 are frozen off-the-shelf baselines; **VideoMAE** is the *video* 3-D competitor
+(the rest are per-frame image models). VideoMAE at native 224px/16f → T'=8 tokens.
 
 **tssl256comb100 also with `tcn_spatial` probe:** test κ **0.551 ± 0.003**, PERµ
 **0.433 ± 0.007**, val κ 0.565, frame-acc 0.569 (lower PER than attentive — the
@@ -41,16 +45,24 @@ kernel-3 TCN smooths temporally).
 - **T-SSL lift:** tssl256comb100 **0.556** vs frozen pretrained V-JEPA2 **0.449** →
   **+0.107 κ** (~+24%).
 
-### Keystone — beats every public image baseline, airtight
-Best image baseline under the **attentive** spatial probe is dinov2 (0.334) /
-sup ViT-L/16 (0.331). Even across *any* probe head the best baseline number is
-~0.363–0.368 (siglip `tcn_spatial` / sup ViT-L/16 mean-pool `tcn`, see `RESULTS.md`)
-— still **far below** frozen pretrained V-JEPA2 (0.449), let alone T-SSL (0.538) or
-+longitudinal (0.556). **The decisive competitor — supervised ViT-L/16 — is now run
-(0.331 ± 0.012) and settles the question.** Note the cross-attn `attentive` pooler
-*hurts* the image baselines vs their `tcn_spatial`/mean-pool scores (e.g. sup ViT-L
-0.331 attentive < 0.368 mean-pool tcn) — the pooler pays off only on
-V-JEPA-style features.
+### Keystone — T-SSL beats every baseline, incl. the strong VideoMAE video model
+Two tiers of baselines:
+- **Image baselines** are weak: best is dinov2 (0.334) / sup ViT-L/16 (0.331), and
+  even across *any* probe head only ~0.363–0.368 (siglip `tcn_spatial` / sup ViT-L/16
+  mean-pool `tcn`, see `RESULTS.md`). The decisive competitor — **supervised ViT-L/16
+  (0.331 ± 0.012)** — is now run and settles the image-baseline question. The cross-attn
+  `attentive` pooler *hurts* image baselines vs their `tcn_spatial`/mean-pool scores
+  (sup ViT-L 0.331 attentive < 0.368 mean-pool tcn) — it pays off only on V-JEPA-style
+  features.
+- **VideoMAE (0.477 ± 0.012)** is a much stronger baseline — as expected, a genuine
+  3-D video-SSL model captures temporal articulation the per-frame image models can't.
+
+**The honest, sharper story:** T-SSL (0.538) and +longitudinal (0.556) beat VideoMAE
+by **+0.061 / +0.079 κ**, but **frozen off-the-shelf V-JEPA2 (0.449) does *not* beat
+VideoMAE (0.477)**. So the win is not "any video model" — it's the **T-SSL
+domain-adaptation** that pulls a video-JEPA ahead of the best generic video encoder.
+That strengthens (not weakens) the T-SSL claim: the adaptation, not the video prior
+alone, is what decodes rtMRI articulation on the OOD speaker.
 
 ---
 
@@ -116,12 +128,14 @@ The frozen feature cache is shared across seeds and probes of the same encoder.
 | base: siglip-L/16 | timm siglip @256 | fp16 | `base_siglipsp_ded94301ff/` (17G) | `base_siglipsp_ded94301ff_attentive_ce_s{0,1,2}` |
 | base: clip-L/14 | timm CLIP @224 | fp16 | `base_clipsp_8725680ba0/` (17G) | `base_clipsp_8725680ba0_attentive_ce_s{0,1,2}` |
 | base: resnet-50 | timm resnet50 @224 | fp16 | `base_resnetsp_dbb271fb97/` (1.9G) | `base_resnetsp_dbb271fb97_attentive_ce_s{0,1,2}` |
+| base: VideoMAE-L | HF `MCG-NJU/videomae-large` @224/16f | fp16 | `videomaesp_71fc822130/` (10G) | `videomaesp_71fc822130_attentive_ce_s{0,1,2}` |
 
 Each `.pt` reloads without retraining and stores: `probe_state`, `probe_kind`,
 `dim`, `num_classes`, `feature_tag`, `seed`, `best_epoch`, `metrics`, `spatial_size`.
 
 Logs: `eval/eval_comb100.log` (bf16 group), `eval/probe_weights_256_baselines.log`
-(fp16 baselines).
+(fp16 image baselines), `eval/eval_videomae.log` (VideoMAE). VideoMAE HF weights
+cached at `/scratch1/hongn/huggingface_checkpoints`.
 
 ---
 
@@ -138,6 +152,7 @@ Logs: `eval/eval_comb100.log` (bf16 group), `eval/probe_weights_256_baselines.lo
 | base:siglip · attentive | 0.287 / 0.672 / 0.317 (e16) | 0.306 / 0.663 / 0.310 (e36) | 0.299 / 0.652 / 0.309 (e8) |
 | base:clip · attentive | 0.285 / 0.667 / 0.318 (e17) | 0.286 / 0.672 / 0.309 (e17) | 0.284 / 0.676 / 0.315 (e33) |
 | base:resnet · attentive | 0.275 / 0.698 / 0.296 (e16) | 0.266 / 0.694 / 0.298 (e6) | 0.271 / 0.687 / 0.290 (e3) |
+| base:videomae · attentive | 0.494 / 0.508 / 0.496 (e23) | 0.473 / 0.539 / 0.520 (e32) | 0.464 / 0.538 / 0.494 (e24) |
 
 ---
 
@@ -149,6 +164,8 @@ source scripts/_env.sh
 bash scripts/18_eval_comb100.sh
 # 2) image-baseline attentive probes (fp16, saves probe .pt):
 bash scripts/17_probe_weights_256.sh
+# 3) VideoMAE video baseline (fp16, attentive, 3 seeds, saves probe .pt):
+bash scripts/19_eval_videomae.sh
 # single run, e.g.:
 python -m artijepa.eval_phoneme --config configs/eval_phoneme_usc_lss_256.yaml \
     --encoder /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_100.pt \
@@ -162,8 +179,17 @@ python -m artijepa.eval_phoneme --config configs/eval_phoneme_usc_lss_256.yaml \
   choice.
 - **tssl256(75) was re-extracted** here (cache `4dcb9400cc`, 3-seed **0.538 ±
   0.007**) with the current code — slightly above the June headline **0.527 ± 0.004**
-  (cache `9ee0a341a1`); within re-extraction noise. Rows 1–3 above share the current
+  (cache `9ee0a341a1`); within re-extraction noise. Rows 1–2/4 above share the current
   code/config, so the comb-vs-75-vs-pretrained comparison is internally consistent.
+- **VideoMAE needs two fixes to be a *faithful* baseline** (both in
+  `artijepa/videomae_baseline.py`): (1) this env's torch 2.6 lacks the
+  `float8_e8m0fnu` dtype that transformers 5.x imports → we alias it + import
+  `VideoMAEModel` from its submodule; (2) transformers 5.x renamed VideoMAE self-attn
+  biases to `query/key/value.bias`, so `from_pretrained` **silently zero-inits** them
+  and drops the checkpoint's original `q_bias`/`v_bias` (‖q_bias‖≈18) →
+  `_restore_attn_biases` copies them back (key bias = 0). Skipping (2) shifts features
+  ~18% and understates VideoMAE. VideoMAE runs at native **224px/16f → T'=8 tokens**
+  (half V-JEPA's 16-token rate; its 16-frame cap is the "best shot").
 - **Cache-key caveat:** `eval_phoneme._tag()` omits the checkpoint path from the
   cache hash → always pass a **fresh `--tag`** per encoder (done: `tssl256comb100`).
 - **Clip-window asymmetry:** the V-JEPA eval config windows 684 utts → 3195 train

@@ -52,6 +52,31 @@ def load_config(path):
 # --------------------------------------------------------------------------- #
 def load_frozen_encoder(cfg, device):
     d, ec = cfg["data"], cfg["encoder"]
+    if ec.get("type") == "videomae":
+        # Frozen 3-D VideoMAE video encoder (the video-SSL baseline, vs the per-frame
+        # image baselines). Native geometry (224px / 16 frames / tubelet 2) is fixed by
+        # the model's positional embeddings, so it OVERRIDES the config's
+        # spatial_size/frames_per_clip/tubelet_size. pool_spatial (set by run() from the
+        # probe head) selects pooled [B,T',D] vs the un-pooled [B,T',S',D] grid.
+        from artijepa.videomae_baseline import VideoMAEEncoder, VIDEOMAE_LARGE
+        enc = VideoMAEEncoder(ec.get("model", VIDEOMAE_LARGE),
+                              pool_spatial=d.get("pool_spatial", True),
+                              grid_cap=ec.get("grid_cap", 16)).to(device)
+        enc.eval()
+        for p in enc.parameters():
+            p.requires_grad = False
+        d["spatial_size"] = enc.backbone.input_size            # 224
+        d["frames_per_clip"] = enc.backbone.num_frames          # 16 (native, fixed)
+        d["tubelet_size"] = enc.backbone.tubelet                # 2 -> T'=8 tokens
+        d["intensity_norm"] = "minmax"
+        d.pop("grayscale_stats", None)
+        ec["spec"] = "videomae_large"                           # feature cache/tag key
+        mode = "pooled [B,T',D]" if enc.backbone.pool_spatial else \
+            f"un-pooled grid [B,T',S'<= {enc.backbone.grid_cap}^2,D]"
+        print(f"[ph-eval] videomae {enc.backbone.name} D={enc.backbone.embed_dim} "
+              f"input={enc.backbone.input_size} 16f/tubelet{enc.backbone.tubelet} "
+              f"minmax->[0,1] -> 3-D tubelet, {mode}")
+        return enc
     if ec.get("type") == "image_baseline":
         # Frozen 2-D image encoder (CLIP/SigLIP/DINOv2/ViT-L/ResNet) applied
         # per-frame + tubelet-pooled to V-JEPA's temporal token grid (Plan Part C
@@ -621,8 +646,9 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--encoder", default=None)
     ap.add_argument("--model", default=None,
-                    help="image-baseline encoder (clip|siglip|dinov2|vitl|resnet "
-                         "or a full timm name); sets encoder.type=image_baseline")
+                    help="baseline encoder: image (clip|siglip|dinov2|vitl|resnet or a "
+                         "full timm name) -> encoder.type=image_baseline; or 'videomae' "
+                         "(video 3-D, MCG-NJU/videomae-large) -> encoder.type=videomae")
     ap.add_argument("--tag", default=None)
     ap.add_argument("--batch", type=int, default=None, help="override data.batch_size")
     ap.add_argument("--probe", default=None,
@@ -642,8 +668,13 @@ def main():
     if args.dtype is not None:
         cfg["meta"]["dtype"] = args.dtype
     if args.model is not None:
-        cfg["encoder"]["type"] = "image_baseline"
-        cfg["encoder"]["model"] = args.model
+        if args.model.lower().startswith("videomae"):
+            cfg["encoder"]["type"] = "videomae"
+            cfg["encoder"]["model"] = ("MCG-NJU/videomae-large"
+                                       if args.model.lower() == "videomae" else args.model)
+        else:
+            cfg["encoder"]["type"] = "image_baseline"
+            cfg["encoder"]["model"] = args.model
     if args.encoder is not None:
         cfg["encoder"]["spec"] = args.encoder
     if args.tag is not None:

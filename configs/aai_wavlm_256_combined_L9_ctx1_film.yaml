@@ -1,0 +1,83 @@
+# AAI-JEPA: acoustic -> rolled-out rtMRI video embeddings, 256px/32f, HARD-CONDITIONING.
+# LAYER-9, ctx=1 + FiLM-injection ablation. Two levers vs aai_wavlm_256_combined_L9_ctx2.yaml,
+# both aimed at the same failure mode (audio_gap never turned on -> predictor ignores audio):
+#   (1) ctx_frames=1: seed ONLY 1 real latent frame, autoregress the remaining 15 of T'=16.
+#       Removes the 2-frame visual crutch that let the predictor extrapolate without audio.
+#   (2) predictor.cond_mode=film: inject WavLM audio by per-block, per-channel Feature-wise
+#       Linear Modulation (gamma/beta scale+shift the visual tokens, adaLN-zero, zero-init)
+#       instead of concatenating audio tokens the self-attention can route around.
+# concat is NOT removed -- cond_mode selects the path (concat|film|cross_attn) at build time.
+#   bash dev_artiJEPA/scripts/16_train_aai.sh <abs>/configs/aai_wavlm_256_combined_L9_ctx1_film.yaml
+meta:
+  folder: /scratch1/hongn/artijepa/runs/aai_wavlm_256_combined_L9_ctx1_film
+  seed: 0
+  dtype: float16          # V100 (Volta): fp16 + GradScaler
+  eval_freq: 1
+  save_freq: 1
+  probe_max_batches: 8    # val batches for the audio real-vs-shuffled (audio_gap) diagnostic
+  max_steps: null
+  resume: null
+  snapshot_freq: null
+
+data:
+  manifest: /scratch1/hongn/artijepa/manifest_combined_aai.csv   # SPEAKER-DISJOINT split (make_aai_split.py)
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats_combined.json
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 50.0        # matches the T-SSL encoder grid; 0.64 s / 32-frame chunk -> T'=16 tokens
+  sampling: tile          # REQUIRED by RTMRIAudioDataset (one (clip,chunk) per item)
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  augment: true
+  batch_size: 3           # ctx=1 = 16 predictor calls/step; peak rollout frame-count (15) equals
+                          # ctx=2 -> same ~22.7 GB ckpt-off on V100-32GB. bs4 too close to 32 GB.
+  num_workers: 4          # loader now DECODES video (decord); keep modest under the --mem cgroup
+  pin_mem: false          # non-reclaimable pinned RAM; compute-bound so no speed loss
+  persistent_workers: false  # respawn per epoch to release worker page-cache under the mem cap
+
+audio:                    # WavLM cache (build_audio_features.py --layer 9)
+  model_name: microsoft/wavlm-base-plus
+  layer: 9                # mid-layer WavLM; articulatory content peaks ~L9-11 (vs the flat L-1 run)
+  dim: 768                # A; must match cache meta.json
+  cache_dir: /scratch1/hongn/artijepa/audio_feats/wavlm_base_plus_L9
+  pool: mean
+  normalize: zscore       # per-dim z-score with corpus stats
+  speaker: false
+  online: false
+
+objective: temporal
+ctx_frames: 1             # <-- seed 1 real frame, predict 15 from audio only (was 2)
+predictor:
+  kind: ac_audio          # state=e[t], action=e[t+1]-e[t]; A=768 state/action encoders reused
+  cond_mode: film         # <-- FiLM injection (per-block gamma/beta) instead of concat tokens
+  pred_depth: 12
+  pred_embed_dim: 384
+  pred_num_heads: 12
+  use_rope: true
+  frame_causal: true
+
+model:
+  model_name: vit_large
+  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_60.pt  # frozen ep60 snapshot (user choice)
+  checkpoint_key: target_encoder
+  use_activation_checkpointing: false   # OFF = fastest; bs3 ctx=1 ~22.7 GB fits with margin
+
+loss:
+  loss_exp: 1.0
+
+optimization:
+  epochs: 20              # first-result run; full cosine anneal by ep20. Extend if audio_gap still improving.
+  ipe: 1000              # bs3 -> accum ~43 -> oue ~23/epoch (eff_batch 128)
+  effective_batch: 128
+  auto_steps: 2           # ignored while ctx_frames is set (context-prefix path)
+  lr: 5.0e-4
+  start_lr: 1.0e-4
+  final_lr: 1.0e-5
+  warmup: 2
+  weight_decay: 0.04
+  final_weight_decay: 0.04
+  ipe_scale: 1.0
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
