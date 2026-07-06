@@ -31,8 +31,8 @@ never collide with the ``subNNN`` 75-speaker ids.
 
 Usage:
     python -m artijepa.build_manifest_longitudinal \
-        --data-root /project2/shrikann_35/kevinyhu/data/longitudinal \
-        --out /scratch1/hongn/artijepa/manifest_longitudinal.csv
+        --data-root /data1/span_data/longitudinal \
+        --out /data2/hongn/artijepa/manifest_longitudinal.csv
     # optional ground-truth verification of n_frames/fps (slow):
     #   ... --probe --workers 16
 """
@@ -176,9 +176,9 @@ def build(data_root, out, subject_prefix="longi_", probe=False, workers=8,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-root",
-                    default="/project2/shrikann_35/kevinyhu/data/longitudinal")
+                    default="/data1/span_data/longitudinal")
     ap.add_argument("--out",
-                    default="/scratch1/hongn/artijepa/manifest_longitudinal.csv")
+                    default="/data2/hongn/artijepa/manifest_longitudinal.csv")
     ap.add_argument("--subject-prefix", default="longi_",
                     help="namespace longitudinal subjects so they never collide "
                          "with the 75-speaker subNNN ids")

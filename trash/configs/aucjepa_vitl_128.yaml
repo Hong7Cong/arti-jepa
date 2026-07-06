@@ -1,7 +1,7 @@
 # AC-JEPA-audio: cheaper 128px/32f ablation + smoke config (fits the Tesla P100-16GB).
 # Frozen encoder -> low VRAM; good for the overfit smoke test (plans_aucjepa.md §9 step 5).
 meta:
-  folder: /scratch1/hongn/artijepa/runs/aucjepa_vitl_128
+  folder: /data2/hongn/artijepa/runs/aucjepa_vitl_128
   seed: 0
   dtype: float16
   eval_freq: 1
@@ -12,8 +12,8 @@ meta:
   snapshot_freq: null
 
 data:
-  manifest: /scratch1/hongn/artijepa/manifest_alltrain.csv
-  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats_128.json
+  manifest: /data2/hongn/artijepa/manifest_alltrain.csv
+  grayscale_stats: /data2/hongn/artijepa/grayscale_stats_128.json
   spatial_size: 128
   spatial_mode: resize
   frames_per_clip: 32
@@ -31,7 +31,7 @@ audio:
   model_name: microsoft/wavlm-base-plus
   layer: -1
   dim: 768
-  cache_dir: /scratch1/hongn/artijepa/audio_feats/wavlm_base_plus
+  cache_dir: /data2/hongn/artijepa/audio_feats/wavlm_base_plus
   pool: mean
   normalize: zscore
   speaker: false
@@ -49,7 +49,7 @@ predictor:
 
 model:
   model_name: vit_large
-  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256/latest.pt
+  checkpoint: /data2/hongn/artijepa/runs/tssl_vitl_256/latest.pt
   checkpoint_key: target_encoder
   use_activation_checkpointing: false
 

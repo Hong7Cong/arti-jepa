@@ -1,6 +1,6 @@
 """usc_lss OOD speaker dataset for phoneme prediction (Arti-JEPA eval Task 2).
 
-`/scratch1/hongn/usc_lss`: ONE held-out speaker (usc_s1), 684 utterances, with
+`/data1/span_data/usc_lss`: ONE held-out speaker (usc_s1), 684 utterances, with
 **gold ARPABET phonemes + timestamps**. This is out-of-distribution vs the
 75-speaker training corpus on three axes -- different speaker, **104x104** video
 (vs 84x84), and **99 fps** (vs 83.28) -- so it is a clean generalization test.
@@ -31,7 +31,7 @@ from artijepa.rtmri_dataset import _intensity_norm, _spatial, _to_gray, PreprocC
 # --------------------------------------------------------------------------- #
 # manifest
 # --------------------------------------------------------------------------- #
-def build_manifest(root="/scratch1/hongn/usc_lss", out_csv=None, verbose=True):
+def build_manifest(root="/data1/span_data/usc_lss", out_csv=None, verbose=True):
     """Probe each utterance's video and write a manifest CSV with split labels."""
     out_csv = out_csv or os.path.join(root, "phoneme_manifest.csv")
     split_of = {}

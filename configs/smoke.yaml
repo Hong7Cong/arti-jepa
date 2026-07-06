@@ -2,7 +2,7 @@
 # a couple of steps. Runs on CPU in well under a minute -- validates the full
 # data -> mask -> encoder -> predictor -> L1 loss -> EMA -> diagnostics path.
 meta:
-  folder: /scratch1/hongn/artijepa/runs/smoke
+  folder: /data2/hongn/artijepa/runs/smoke
   seed: 0
   dtype: float32
   eval_freq: 1
@@ -12,7 +12,7 @@ meta:
   max_steps: 3
 
 data:
-  manifest: /scratch1/hongn/artijepa/manifest_split.csv
+  manifest: /data2/hongn/artijepa/manifest_split.csv
   grayscale_stats: null
   spatial_size: 96
   spatial_mode: pad

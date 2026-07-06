@@ -8,7 +8,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/_env.sh"
 CFG="${DEV_DIR}/configs/eval_phoneme_usc_lss.yaml"
-TSSL=/scratch1/hongn/artijepa/runs/tssl_vitl_128/latest.pt
+TSSL=/data2/hongn/artijepa/runs/tssl_vitl_128/latest.pt
 
 HEADS=("$@")
 [ ${#HEADS[@]} -eq 0 ] && HEADS=(tcn lstm transformer)

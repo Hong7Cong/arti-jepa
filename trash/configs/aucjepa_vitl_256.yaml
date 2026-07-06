@@ -2,7 +2,7 @@
 # Primary config (plans_aucjepa.md §7). Encoder is FROZEN -> no backward through it,
 # so VRAM is far lower than T-SSL and batch can be larger.
 meta:
-  folder: /scratch1/hongn/artijepa/runs/aucjepa_vitl_256
+  folder: /data2/hongn/artijepa/runs/aucjepa_vitl_256
   seed: 0
   dtype: float16          # V100/P100 -> fp16 + GradScaler (Ampere+ -> bfloat16)
   eval_freq: 1
@@ -13,8 +13,8 @@ meta:
   snapshot_freq: null
 
 data:
-  manifest: /scratch1/hongn/artijepa/manifest_alltrain.csv
-  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
+  manifest: /data2/hongn/artijepa/manifest_alltrain.csv
+  grayscale_stats: /data2/hongn/artijepa/grayscale_stats.json
   spatial_size: 256
   spatial_mode: resize
   frames_per_clip: 32
@@ -39,7 +39,7 @@ audio:                    # WavLM cache (build_audio_features.py)
   model_name: microsoft/wavlm-base-plus
   layer: -1
   dim: 768                # A; must match cache meta.json
-  cache_dir: /scratch1/hongn/artijepa/audio_feats/wavlm_base_plus
+  cache_dir: /data2/hongn/artijepa/audio_feats/wavlm_base_plus
   pool: mean
   normalize: zscore       # per-dim z-score with corpus stats | none
   speaker: false
@@ -57,7 +57,7 @@ predictor:
 
 model:
   model_name: vit_large
-  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256/latest.pt
+  checkpoint: /data2/hongn/artijepa/runs/tssl_vitl_256/latest.pt
   checkpoint_key: target_encoder
   use_activation_checkpointing: false   # OFF at batch 4: the rollout graph fits in ~28GB
                           # and we save the ~30% recompute (compute-bound -> direct speedup).

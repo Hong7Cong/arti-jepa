@@ -3,7 +3,7 @@
 # Distinct run name from the 75-only run (runs/tssl_vitl_256) so its checkpoints
 # are preserved -> this is the WITH-longitudinal arm of the ablation.
 meta:
-  folder: /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined
+  folder: /data2/hongn/artijepa/runs/tssl_vitl_256_combined
   seed: 0
   dtype: float16          # V100 (Volta) has no bf16 tensor cores -> fp16 + GradScaler
   eval_freq: 1            # run label-free collapse diagnostics every N epochs
@@ -18,8 +18,8 @@ data:
   # 9,353 train videos -> 343,517 tile chunks @ 256/50fps. Build with
   # scripts/01b_prepare_longitudinal.sh. WITHOUT-longitudinal baseline =
   # configs/tssl_vitl_256.yaml (manifest_alltrain.csv, runs/tssl_vitl_256).
-  manifest: /scratch1/hongn/artijepa/manifest_combined.csv
-  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats_combined.json
+  manifest: /data2/hongn/artijepa/manifest_combined.csv
+  grayscale_stats: /data2/hongn/artijepa/grayscale_stats_combined.json
   spatial_size: 256
   spatial_mode: resize
   frames_per_clip: 32
@@ -38,7 +38,7 @@ data:
 model:
   model_name: vit_large
   pretrained: true        # T-SSL = domain-adaptive continuation from V-JEPA2 ViT-L
-  checkpoint: null        # auto-resolve vitl.pt under /scratch1/hongn/artijepa/checkpoints
+  checkpoint: null        # auto-resolve vitl.pt under /data2/hongn/artijepa/checkpoints
   checkpoint_key: target_encoder
   use_activation_checkpointing: true
 

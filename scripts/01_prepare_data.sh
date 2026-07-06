@@ -4,7 +4,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/_env.sh"
 
-DATA_ROOT="${1:-/scratch1/hongn/speaker75}"
+DATA_ROOT="${1:-/data1/span_data/rtmri75s}"
 mkdir -p "${ARTI_OUT}"
 
 echo "== build manifest (with decord probe of fps/n_frames) =="

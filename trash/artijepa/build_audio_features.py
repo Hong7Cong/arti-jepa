@@ -15,8 +15,8 @@ loads WavLM:
 
     conda activate /scratch1/hongn/conda/envs/his-extract
     PYTHONPATH=.:dev_artiJEPA python -m artijepa.build_audio_features \
-        --manifest /scratch1/hongn/artijepa/manifest_alltrain.csv \
-        --out /scratch1/hongn/artijepa/audio_feats/wavlm_base_plus \
+        --manifest /data2/hongn/artijepa/manifest_alltrain.csv \
+        --out /data2/hongn/artijepa/audio_feats/wavlm_base_plus \
         --model microsoft/wavlm-base-plus --layer -1 --limit 20      # smoke
 
 Training (``aucjepa_train.py``) reads only the ``.npy`` + ``meta.json`` (no
@@ -34,7 +34,7 @@ import torch
 from artijepa.audio_phoneme import extract_audio
 
 DEFAULT_MODEL = "microsoft/wavlm-base-plus"
-DEFAULT_OUT = "/scratch1/hongn/artijepa/audio_feats/wavlm_base_plus"
+DEFAULT_OUT = "/data2/hongn/artijepa/audio_feats/wavlm_base_plus"
 SR = 16000
 
 
@@ -143,7 +143,7 @@ def build_audio_features(manifest, out_dir=DEFAULT_OUT, model_name=DEFAULT_MODEL
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--manifest", default="/scratch1/hongn/artijepa/manifest_alltrain.csv")
+    ap.add_argument("--manifest", default="/data2/hongn/artijepa/manifest_alltrain.csv")
     ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--layer", type=int, default=-1)

@@ -32,7 +32,7 @@ from artijepa.rtmri_dataset import _intensity_norm, _spatial, _to_gray, PreprocC
 
 # default audio phoneme recogniser (eSpeak IPA phonemes via wav2vec2-large CTC)
 DEFAULT_MODEL = "facebook/wav2vec2-lv-60-espeak-cv-ft"
-DEFAULT_LABEL_DIR = "/scratch1/hongn/artijepa/pseudo_phonemes"
+DEFAULT_LABEL_DIR = "/data2/hongn/artijepa/pseudo_phonemes"
 
 
 def _ffmpeg():

@@ -41,11 +41,15 @@ articulator tracking. The arti `.mat` files are a **different, self-contained co
   `target_fps = 100` (native, no consonant aliasing).
 - Splits are **session-disjoint** (one speaker ⇒ speaker-disjoint impossible; documented
   fallback per plan §1.3). 71 sessions → ~70/15/15% train/val/test.
-- **Phoneme head `C` / planner goal-labels (M2–M5) have an OPEN [VERIFY]:** the gold
-  phoneme `.json` are per-**utterance** (`usc_s1_<NN>_<rep>.json`, 684) while the cache
-  is per-**session** (`usc_s1_<NN>_mview`, 71). Mapping utterance phoneme timing into
-  session frame time (offset within the session recording) is **not yet resolved** — it
-  blocks Energy-1/2 and the phoneme-reachability eval, NOT the forward model.
+- **Phoneme head `C` / planner goal-labels (M2–M5) [VERIFY] — RESOLVED 2026-07-01:** the gold
+  phoneme `.json` are per-**utterance** (`usc_s1_<NN>_<rep>.json`, 684) while arti-6 lives in
+  the per-**session** `.mat` (71). The utterance→session offset IS recoverable: the per-utterance
+  `video/usc_s1_<NN>_<rep>.avi` are consecutive segments of the session, so **whole-sequence
+  frame-matching** the utt frames against the cached session `IMAGE`
+  (`arti_feats/usc_lss/<sess>.image.npy`) gives a clean unique offset (validated: utt_10_0→148,
+  10_1→442, 10_5→2150; minL1≈4 « median≈8, offsets monotonic; single-frame match is ambiguous —
+  MRI frames too self-similar — MUST match the whole subsampled sequence). ⇒ slice arti-6
+  `[offset:offset+n_frames]` per utt → frame-exact arti-6 on the gold-phoneme timeline. Unblocks M2/M4/M5.
 
 ---
 
@@ -93,18 +97,30 @@ articulator tracking. The arti `.mat` files are a **different, self-contained co
       `ctx_frames=8` (rest of clip guessable by motion), 2 cond-tokens/frame vs 256 visual,
       and a single-speaker shuffle (weak negative).
       **Next (A + C first):**
-      - **A — LAUNCHED 2026-06-30.** `acjepa_arti6_256_ctx2_ddp.yaml` (`ctx_frames: 2`,
-        rollout 8→14 frames, ~280 ms arti-only). Running on 2× P100, ~18 s/step (~5 h/epoch),
-        act-ckpt ON fits 16 GB. `runs/acjepa_arti6_256_ctx2_ddp/`. **Watch `diagnostics.jsonl`
-        `arti_gap`** — must climb well above the ctx=8 ~5e-4 plateau to confirm arti is now used.
+      - **A — DONE 2026-07-01 ✅ (it works).** Ran full 20 ep from scratch single-GPU **V100-32GB**
+        (`acjepa_arti6_256_v100_ctx2.yaml`, `ctx_frames:2`, ckpt-off, **batch 3** — 15-call rollout
+        needs ~1.6× VRAM: bs3=22.7GB safe / bs4=29GB too close; ~3.65 s/step, ~61 min/ep, compute-
+        bound). `runs/acjepa_arti6_256_v100_ctx2/` (ep20 ckpt). **`arti_gap` broke the ctx=8 plateau:**
+        tracked ~5e-4 through ep8, then ep9 1.6e-3 → peak **ep19 6.9e-3**, ep20 5.6e-3 (~10–14×
+        baseline; val_ar_l1 0.66→0.428). Confirms ctx=2 makes P use arti — but still small absolute
+        (~1.3% of AR L1, ~22% of the AR-rollout penalty; readout ceiling per §8.1). NB the ep10 SIGKILL
+        was a `--mem=64G` cgroup OOM from dataloader pinning/8-persistent-workers, NOT GPU — fixed with
+        `num_workers:4/pin_mem:false/persistent_workers:false`, resumed from ep9 ckpt. Full write-up:
+        `aucjepa_plans_new.md` §8.3; results table in `RESULTS.md`.
+        *(The 2×P100 `acjepa_arti6_256_ctx2_ddp` variant was superseded by this V100 run.)*
       - **C** — M2 redundancy probe (phoneme-from-`z` vs phoneme-from-`arti-6`). If arti-6
         alone ≈ as good, `z` is redundant → **pivot to Energy-3 arti-space planning** (already
         implemented in `acjepa_energy`/`acjepa_plan`); "P ignores arti" becomes evidence for
         the right design, planning value comes from sequences/coarticulation/constraints.
       - **B** — FiLM arti into every token (adapter change). **D** — predict skip-K/residual.
-- [ ] **M2** — phoneme head `C` (or prototypes `μ_p`) **[blocked on the utterance↔session
-      alignment above]**. Decide via a probe: does `C` predict phonemes better from `z`
-      than from `arti-6` directly? (plan §7 — "do you even need `z`?").
+- [ ] **M2 — NEXT UP (alignment now resolved, see above).** Redundancy probe: does a probe
+      predict gold phonemes better from `z` than from `arti-6` directly? (plan §7 — "do you even
+      need `z`?"). Plan: (1) build utt→session offset table for all 684 via whole-seq frame-match,
+      cache to json; (2) slice frame-exact arti-6 per utt; (3) train BOTH probes with identical
+      splits/token-grid/kappa — z→gold-phoneme (phoneme-from-z already exists as
+      `eval/phoneme_usc_lss_tssl256sp_*.json`, but rerun for protocol parity) and arti6→gold-phoneme.
+      If arti-6 alone ≈ as good → `z` redundant → pivot to Energy-3 arti-space planning. Uses the
+      ctx=2 predictor `runs/acjepa_arti6_256_v100_ctx2/latest.pt` (ep20, arti_gap 5.6e-3).
 - [ ] **M3** — `aucjepa_energy` + 1-step CEM sanity on **Energy 3** (closed-form arti
       target) — the smoke test already exercises the CEM mechanics; M3 runs it against a
       real trained `P` and a real `arti_targets.npy` table.
@@ -173,10 +189,9 @@ Outputs per run under `meta.folder`: `train_log.csv`, `diagnostics.jsonl` (TF/AR
 frozen from `model.checkpoint`).
 
 ## Open questions / [VERIFY]
-- **Utterance↔session phoneme alignment** (blocks M2/M4/M5): map per-utterance gold
-  phoneme timestamps onto session frame time. Options: (a) find each utterance's start
-  offset within its `_mview` session; (b) re-segment sessions into utterances and cache
-  per-utterance; (c) force-align phonemes to the session audio directly. Decide before C.
+- **Utterance↔session phoneme alignment — RESOLVED 2026-07-01** (was blocking M2/M4/M5). Use
+  option (a): whole-sequence frame-match the utt `.avi` against the cached session `IMAGE`
+  → offset → slice arti-6. Validated; see the M0.5 note at the top. (b)/(c) not needed.
 - **Do we even need `z`?** (plan §7) — if the 6 articulators fully describe the state,
   Energy 3 plans in 6-D with trivial dynamics. Add the video model only if `z` carries
   phonetic info the 6 features don't. Resolve with the M2 probe.

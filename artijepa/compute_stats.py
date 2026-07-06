@@ -7,8 +7,8 @@ common range that is applied at load time and reused across every experiment.
 
 Usage:
     python -m artijepa.compute_stats \
-        --manifest /scratch1/hongn/artijepa/manifest_split.csv \
-        --out /scratch1/hongn/artijepa/grayscale_stats.json \
+        --manifest /data2/hongn/artijepa/manifest_split.csv \
+        --out /data2/hongn/artijepa/grayscale_stats.json \
         --spatial-size 256 --max-clips 300
 """
 
@@ -22,8 +22,8 @@ from artijepa.rtmri_dataset import PreprocConfig, RTMRIVideoDataset
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--manifest", default="/scratch1/hongn/artijepa/manifest_split.csv")
-    ap.add_argument("--out", default="/scratch1/hongn/artijepa/grayscale_stats.json")
+    ap.add_argument("--manifest", default="/data2/hongn/artijepa/manifest_split.csv")
+    ap.add_argument("--out", default="/data2/hongn/artijepa/grayscale_stats.json")
     ap.add_argument("--spatial-size", type=int, default=256)
     ap.add_argument("--spatial-mode", default="resize")
     ap.add_argument("--frames-per-clip", type=int, default=32)

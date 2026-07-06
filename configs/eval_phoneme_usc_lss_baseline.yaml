@@ -4,15 +4,15 @@
 # Pick the encoder with `--model {clip|siglip|dinov2|vitl|resnet}` (+ `--tag`).
 # Plan Part C: quantifies the JEPA-specific benefit vs generic pretrained vision.
 meta:
-  out: /scratch1/hongn/artijepa/eval
-  cache_dir: /scratch1/hongn/artijepa/feat_cache/phoneme
+  out: /data2/hongn/artijepa/eval
+  cache_dir: /data2/hongn/artijepa/feat_cache/phoneme
   seed: 0
   dtype: float16          # P100 (no bf16); fine for frozen feature extraction
   tag: null               # set per model via --tag (e.g. base_clip)
 
 data:
   kind: usc_lss
-  manifest: /scratch1/hongn/usc_lss/phoneme_manifest.csv
+  manifest: /data1/span_data/usc_lss/phoneme_manifest.csv
   # NB: spatial_size + intensity_norm are auto-set per model (native size, minmax
   # [0,1], no rtMRI channel-norm) in load_frozen_encoder -- values here are placeholders.
   spatial_size: 224

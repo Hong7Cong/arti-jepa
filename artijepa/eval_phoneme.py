@@ -18,11 +18,11 @@ Per-token features: the ViT emits tokens in temporal-major order, so
 OOD 99 fps is handled by the resample alone.
 
 Run:
-    cd /project2/shrikann_35/hongn/vjepa2
+    cd /data2/hongn/vjepa2
     PYTHONPATH=.:dev_artiJEPA python -m artijepa.eval_phoneme \
         --config dev_artiJEPA/configs/eval_phoneme_usc_lss.yaml
     # with-T-SSL:
-    ... --encoder /scratch1/hongn/artijepa/runs/tssl_vitl_128/latest.pt --tag tssl128
+    ... --encoder /data2/hongn/artijepa/runs/tssl_vitl_128/latest.pt --tag tssl128
 """
 
 import argparse

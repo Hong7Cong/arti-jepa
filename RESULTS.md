@@ -240,3 +240,32 @@ tiny real-data frozen + finetune smoke on VideoMAE-base). Runs below are **TBA**
 Also TBA: `type3` (block/rep/pro only) and the `binary` fluent-vs-disfluent
 baseline; the `disfluency2` (rep-heavy) tier as a secondary report. JSONs will
 persist to `eval/disfluency_*_s{seed}.json`.
+
+---
+
+## AC-JEPA forward model `P` — `arti_gap` (2026-06-30 → 07-01)
+
+Frozen T-SSL ViT-L (`tssl_vitl_256`, κ 0.530) + arti-conditioned AC predictor (22.1M, `A=6`),
+temporal world-model objective on usc_lss sessions @256px/32f/100fps. Metric = **`arti_gap`** =
+`val_shuf_ar_l1 − val_ar_l1` (autoregressive future-pred L1 in layer-normed feature space, real
+vs batch-shuffled articulators). Large + = predictor USES arti; ≈0 = ignores it. Details of the
+finding + root cause in `aucjepa_plans_new.md` §8.
+
+| run | ctx_frames | GPU / batch | epochs | `arti_gap` | val_ar_l1 | verdict |
+|---|---|---|---|---|---|---|
+| `acjepa_arti6_256_ddp` | 8 | 2×P100 / 2·2 | 8/20 (stopped) | plateau **5e-4–1e-3** (~0.1–0.2% of AR L1) | 0.440 | predictor **ignores** arti |
+| `acjepa_arti6_256_v100` | 8 | V100 / 4 | 6 (killed) | ~5e-4 @ep5 (reproduces plateau) | 0.492 | baseline |
+| **`acjepa_arti6_256_v100_ctx2`** | **2** | **V100 / 3, ckpt-off** | **20 (DONE)** | broke plateau @ep9, **peak 6.9e-3 @ep19, 5.6e-3 @ep20** (~10–14×) | 0.428 | **uses arti (weakly)** |
+
+**ctx=2 trajectory:** ep8 5.4e-4 → ep9 1.6e-3 → ep12 4.5e-3 → ep15 5.5e-3 → ep19 **6.9e-3** →
+ep20 5.6e-3 (noisy ~5–7e-3 band; ep17 dip 1.6e-3). ep20 triple: `val_tf_l1` 0.4035 / `val_ar_l1`
+0.4285 / `val_shuf_ar_l1` 0.4341.
+
+**Reading it:** ctx=2 (plan §8 fix A — seed only 2 tokens, predict ~14 from arti alone) made the
+predictor use the articulators, ~10× the ctx=8 baseline. But the gap is **small in absolute terms
+(~1.3% of AR L1)** — expected, since arti-6 is a *readout* of the MRI the encoder already sees
+(§8.1 low ceiling). Fairer denominator = the AR-rollout penalty `ar_real−tf` = 0.025 ⇒ right arti
+recovers **~22%** of it. Likely understated by the within-batch shuffle (batch 3) + only 8 val
+batches. **Next: M2 redundancy probe** (phoneme-from-`z` vs `arti-6`) to decide whether to keep the
+video world model or pivot to Energy-3 arti-space planning; the utt↔session alignment blocker is
+now resolved (see `TODO_acjepa.md`). ckpt `runs/acjepa_arti6_256_v100_ctx2/latest.pt`.

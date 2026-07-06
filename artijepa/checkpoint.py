@@ -1,7 +1,7 @@
 """Locate / download V-JEPA 2 pretrained checkpoints.
 
 The parent repo's ``src/hub/backbones.py`` points at a localhost stub, so we
-fetch the real weights from the public mirror and cache them under /scratch1.
+fetch the real weights from the public mirror and cache them under ARTI_OUT.
 """
 
 import os
@@ -9,7 +9,7 @@ import os
 import torch
 
 FBAI_BASE = "https://dl.fbaipublicfiles.com/vjepa2"
-DEFAULT_CACHE = "/scratch1/hongn/artijepa/checkpoints"
+DEFAULT_CACHE = "/data2/hongn/artijepa/checkpoints"
 
 # model_name -> remote filename
 FILES = {

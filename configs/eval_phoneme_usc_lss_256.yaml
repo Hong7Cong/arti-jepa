@@ -3,16 +3,16 @@
 # are pooled), so the feature cache is the same size as 128px — only the encoder
 # forward is heavier. Run pretrained (baseline) then tssl_256 for the Δκ/ΔPER.
 meta:
-  out: /scratch1/hongn/artijepa/eval
-  cache_dir: /scratch1/hongn/artijepa/feat_cache/phoneme
+  out: /data2/hongn/artijepa/eval
+  cache_dir: /data2/hongn/artijepa/feat_cache/phoneme
   seed: 0
   dtype: bfloat16
   tag: null
 
 data:
   kind: usc_lss
-  manifest: /scratch1/hongn/usc_lss/phoneme_manifest.csv
-  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
+  manifest: /data1/span_data/usc_lss/phoneme_manifest.csv
+  grayscale_stats: /data2/hongn/artijepa/grayscale_stats.json
   spatial_size: 256
   spatial_mode: resize
   frames_per_clip: 32

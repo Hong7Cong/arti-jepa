@@ -305,3 +305,32 @@ neither makes arti necessary, the honest conclusion is that arti-conditioned *vi
 modeling* is low-value on this data (redundant signal), and the project pivots cleanly to
 **Energy-3 arti-space planning**, where the implemented modules already work. The epoch-8 `P`
 checkpoint is kept as the ctx_frames=8 baseline for the ablation.
+
+### 8.3 Fix A (`ctx_frames=2`) RESULT — 2026-07-01: it works, but arti is inherently weak
+
+Ran fix **A** from scratch, full 20 epochs, single-GPU V100-32GB (`runs/acjepa_arti6_256_v100_ctx2`,
+config `acjepa_arti6_256_v100_ctx2.yaml`; ckpt-off, batch 3 — the 1TF+14AR = 15-call rollout needs
+~1.6× the VRAM of ctx=8, bench: bs3=22.7 GB safe / bs4=29 GB too close to 32 GB). Compute-bound,
+~3.65 s/step, ~61 min/epoch. (Also ran a ctx=8 V100 baseline `runs/acjepa_arti6_256_v100`, killed
+@ep6, that reproduced the ~5e-4 plateau.)
+
+**`arti_gap` broke the plateau and climbed ~10×.** It tracked the ctx=8 ~5e-4 line through ep8,
+then rose monotonically from ep9: ep9 1.6e-3 → ep12 4.5e-3 → **peak ep19 6.9e-3**, ep20 5.6e-3
+(settled in a noisy ~5–7e-3 band; ep17 dipped to 1.6e-3 — the estimate is noisy, see caveats).
+That is **~10–14× the ctx=8 ceiling** ⇒ **forcing a long arti-only horizon does make the predictor
+use the articulators.** Meanwhile the world model kept sharpening (val_ar_l1 0.66→0.428).
+
+**BUT the gap is still small in absolute terms (~1.3 % of AR L1)** — exactly as §8.1 predicts (arti
+is a *readout*, so there's a low ceiling on how much conditioning can help next-frame prediction).
+A fairer denominator is the **AR-rollout penalty** `ar_real − tf` = 0.428 − 0.404 = 0.025: the right
+articulators recover **~22 %** of it, so arti is not negligible for the rollout, just capped. Two
+measurement effects likely *understate* it: the diagnostic shuffles **within-batch** (batch 3 → each
+"wrong" arti drawn from only 2 others, weak negative), and averages only `probe_max_batches=8` val
+batches (noisy). A global shuffle + all-val re-measure on the ep20 ckpt would tighten it.
+
+**Verdict / next.** Fix A succeeded directionally but confirms arti-conditioned video forward
+modeling has limited headroom here. **Do NOT chase a bigger `arti_gap`** — run **C (M2 redundancy
+probe)** to decide the pivot: if arti-6 predicts phonemes ≈ as well as `z`, go to Energy-3 arti-space
+planning and treat the small gap as evidence for that design. **The M2 utterance↔session alignment
+blocker is now RESOLVED** (whole-sequence frame-match of the per-utt `.avi` to the cached session
+`IMAGE` → offset → slice frame-exact arti-6; validated). See `TODO_acjepa.md` M2.

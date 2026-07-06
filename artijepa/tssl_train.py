@@ -8,7 +8,7 @@ stimulus-group probe was removed; downstream eval is phoneme prediction, see
 ``eval_phoneme.py``).
 
 Run:
-    cd /project2/shrikann_35/hongn/vjepa2
+    cd /data2/hongn/vjepa2
     PYTHONPATH=.:dev_artiJEPA python -m artijepa.tssl_train \
         --config dev_artiJEPA/configs/tssl_vitl_256.yaml
 """

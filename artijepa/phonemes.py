@@ -5,7 +5,7 @@ articulatory test of whether the JEPA video representation encodes speech
 content. Two evals share this module:
 
   * **Task 2 (gold):** hand-annotated ARPABET phonemes with timestamps for one
-    held-out OOD speaker (`/scratch1/hongn/usc_lss`; 104x104 video @ 99 fps,
+    held-out OOD speaker (`/data1/span_data/usc_lss`; 104x104 video @ 99 fps,
     16 kHz audio, 684 utterances).
   * **Task 1 (pseudo):** phoneme labels from an audio model (wav2vec2 / WavLM CTC)
     run on the 75-speaker corpus's paired audio (`audio_phoneme.py`).

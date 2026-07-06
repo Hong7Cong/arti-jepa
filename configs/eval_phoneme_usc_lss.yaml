@@ -1,16 +1,16 @@
 # Phoneme-prediction eval, Task 2: GOLD phonemes, OOD speaker usc_lss.
 # 104x104 @ 99 fps video -> resampled to target_fps (frame-rate agnostic align).
 meta:
-  out: /scratch1/hongn/artijepa/eval
-  cache_dir: /scratch1/hongn/artijepa/feat_cache/phoneme
+  out: /data2/hongn/artijepa/eval
+  cache_dir: /data2/hongn/artijepa/feat_cache/phoneme
   seed: 0
   dtype: bfloat16          # L40S (Ada) bf16; use float16 on V100
   tag: null                # null -> derived from encoder.spec
 
 data:
   kind: usc_lss
-  manifest: /scratch1/hongn/usc_lss/phoneme_manifest.csv   # build via artijepa.usc_lss.build_manifest
-  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
+  manifest: /data1/span_data/usc_lss/phoneme_manifest.csv   # build via artijepa.usc_lss.build_manifest
+  grayscale_stats: /data2/hongn/artijepa/grayscale_stats.json
   spatial_size: 128        # 128 fast / 256 headline; encoder is res-agnostic (RoPE)
   spatial_mode: resize
   frames_per_clip: 32

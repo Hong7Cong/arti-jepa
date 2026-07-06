@@ -7,8 +7,8 @@ writes it back with an added `split` column.
 
 Usage:
     python -m artijepa.splits \
-        --manifest /scratch1/hongn/artijepa/manifest.csv \
-        --out /scratch1/hongn/artijepa/manifest_split.csv \
+        --manifest /data2/hongn/artijepa/manifest.csv \
+        --out /data2/hongn/artijepa/manifest_split.csv \
         --val-frac 0.12 --test-frac 0.12 --seed 0
 """
 
@@ -42,8 +42,8 @@ def assign_splits(subjects, val_frac, test_frac, seed):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--manifest", default="/scratch1/hongn/artijepa/manifest.csv")
-    ap.add_argument("--out", default="/scratch1/hongn/artijepa/manifest_split.csv")
+    ap.add_argument("--manifest", default="/data2/hongn/artijepa/manifest.csv")
+    ap.add_argument("--out", default="/data2/hongn/artijepa/manifest_split.csv")
     ap.add_argument("--val-frac", type=float, default=0.12)
     ap.add_argument("--test-frac", type=float, default=0.12)
     ap.add_argument("--seed", type=int, default=0)

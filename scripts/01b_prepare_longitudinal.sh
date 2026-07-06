@@ -14,7 +14,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/_env.sh"
 
-LONGI_ROOT="${1:-/project2/shrikann_35/kevinyhu/data/longitudinal}"
+LONGI_ROOT="${1:-/data1/span_data/longitudinal}"
 SPEAKER75_MANIFEST="${2:-${ARTI_OUT}/manifest_alltrain.csv}"
 mkdir -p "${ARTI_OUT}"
 

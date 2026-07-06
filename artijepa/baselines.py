@@ -30,7 +30,8 @@ BASELINES = {
     "clip":   "vit_large_patch14_clip_224.openai",          # OpenAI CLIP-L/14   D=1024 @224
     "siglip": "vit_large_patch16_siglip_256.webli",         # SigLIP-L/16        D=1024 @256
     "dinov2": "vit_large_patch14_dinov2.lvd142m",           # DINOv2 ViT-L/14    D=1024 @518
-    "vitl":   "vit_large_patch16_224.augreg_in21k_ft_in1k",  # supervised ViT-L/16 D=1024 @224
+    "dinov3": "vit_large_patch16_dinov3.lvd1689m",          # DINOv3 ViT-L/16    D=1024 (LVD-1689M)
+    "vitl":   "vit_large_patch16_224.augreg_in21k_ft_in1k",  # Google supervised ViT-L/16 (AugReg IN21k->IN1k) D=1024 @224
     "resnet": "resnet50.a1_in1k",                           # ResNet-50 (IN1k)   D=2048 @224
 }
 

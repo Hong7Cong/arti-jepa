@@ -6,24 +6,25 @@ Evaluate frozen encoder features (our T-SSL checkpoints + public image models) o
 in `TODO_pretraining.md`; file map in `Master.md`.
 
 **Eval task pivot (2026-06-07):** the weak stimulus-group classification was
-**removed** (clip-type says nothing about articulation). Label source:
+**removed** (clip-type says nothing about articulation). Two label sources:
+- **Task 1 — pseudo** phonemes from an audio model (wav2vec2/WavLM CTC) on the
+  75-speaker corpus's paired audio (in-domain speakers).
 - **Task 2 — gold** phonemes w/ timestamps for one **OOD** speaker
   (`/scratch1/hongn/usc_lss`, 104×104 @ 99 fps, 684 utts, 41 ARPABET).
 
-**Task-1 pseudo phonemes removed (2026-06-30):** the audio-model (wav2vec2/WavLM
-CTC) pseudo-label route on the 75-speaker corpus's paired audio was dropped —
-superseded by the new downstream tasks below (stuttering/gloss classification,
-articulatory-condition JEPA, AAI). `audio_phoneme.py`,
-`configs/eval_phoneme_pseudo.yaml` are now dead for eval.
+**Env caveat (audio model):** `transformers 5.10.2` needs torch≥2.7 but this env
+has 2.6 → CTC import fails. Task-1 label-gen (`build_pseudo_labels`) is a
+**decoupled** batch step: run in a compatible env (`pip install 'transformers<5'`
+or torch≥2.7); it writes `.npy` label streams the artijepa eval reads.
 
 **Alignment** is in **seconds** (frame-rate agnostic): clips resampled to
-target_fps (50); 1 JEPA token = tubelet 2 → 80 ms. The 99-fps OOD speaker needs
-no special-casing.
+target_fps (25), audio phoneme stream ~50 Hz, 4 audio units ≈ 1 JEPA token
+(tubelet 2 → 80 ms). The 99-fps OOD speaker needs no special-casing.
 
 **Eval infra (DONE):** `eval_phoneme.py` (freeze encoder → per-temporal-token
 features → per-token probe → κ + PER), `phonemes.py` (41-ARPABET, seconds-based
 alignment, CTC-collapse, PER, κ), `usc_lss.py` (OOD manifest+dataset),
-`baselines.py` (public image models).
+`audio_phoneme.py` (Task-1 pseudo pipeline), `baselines.py` (public image models).
 Probe heads: `linear`/`mlp`/`tcn`/`lstm`/`transformer` (CE/CTC) +
 `tcn_spatial`/`attentive` (spatial-aware, the winners).
 
@@ -69,104 +70,15 @@ setsid env PYTHONUNBUFFERED=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
 - Then aggregate all `_s{0,1,2}.json` (`eval/aggregate_spatial.py`) → fill the
   3-seed table in `RESULTS.md`.
 
----
-
-## ▶ NEW DOWNSTREAM TASKS (added 2026-06-30)
-
-These extend eval beyond OOD phoneme decoding to clinical articulation corpora and
-to the condition-aware / acoustic directions. Each needs a TextGrid parser + a
-manifest builder pairing the annotation with the paired rtMRI video; reuse the
-seconds-based alignment + frozen-encoder→per-token-feature path from
-`eval_phoneme.py`.
-
-### 8. Stuttering disfluency-type classification — **PIPELINE BUILT, RESULTS TBA**
-Segment-level classification of **disfluency type** from frozen (or fine-tuned)
-rtMRI features. Infra landed 2026-06-30; the runs themselves are TBA.
-- **Data:** `/data1/span_data/stuttering/PWS{3,4,5,6,7,8,10}/textgrid/*.TextGrid`
-  (498 files, 7 PWS speakers) + paired `avi/` video (104×104 @ 99 fps, **same
-  geometry as usc_lss**). Two label tiers:
-  - `disfluency` (primary): ~2100 labeled events. Canonical types
-    **block / rep / pro** + rare **osci / revert / filler / abandon**.
-  - `disfluency2` (secondary/overlapping): 126 labeled events, ~99% **rep**.
-- **Manifest (DONE):** `build_manifest()` → `disfluency_manifest.csv` = **3130
-  segments** (rep 795 / block 693 / pro 620 / osci 42 / other 21 / fluent 959;
-  62 dropped for dur, 1 uncanon). Per-speaker: PWS3 735, PWS6 729, PWS5 433,
-  PWS4 378, PWS8 364, PWS10 296, PWS7 195.
-- **Labels (DONE):** `stutter.canonicalize()` — type = substring after first `_`;
-  typo repair (`blcok/blok`→block, `repo/red/ep/wordrep`→rep, `fille`→filler),
-  strip `?`; bucket5 {block, rep, pro, osci, other}. Compound `a+b` → primary
-  component (single-label) + full component set (`multi` column). Tasks: `type5`
-  / `type3` (block/rep/pro) / `binary` (fluent-vs-disfluent, needs fluent negs).
-- **Probe (DONE):** frames sampled uniformly across each padded interval → frozen
-  encoder → **attentive pool over all clip tokens → linear** (`SegmentProbe`;
-  mean/mlp variants too). Inverse-freq class weighting for imbalance.
-- **Encoders wired:** frozen V-JEPA2 / T-SSL (`--encoder`), image baselines
-  (`--model {clip|siglip|dinov2|vitl|resnet}`), and **VideoMAE-L frozen +
-  fine-tune** (`--model videomae [--mode finetune]`). **Canonical = attentive @
-  256px, LOSO** over the 7 PWS (frozen path only, one shared feature cache).
-- **Metric:** severe imbalance → **macro-F1 (primary) + balanced accuracy +
-  confusion matrix**, per held-out speaker and pooled over folds.
-- **Built:** `artijepa/stutter.py`, `artijepa/eval_disfluency.py`,
-  `artijepa/videomae_baseline.py`, `configs/eval_disfluency.yaml`,
-  `scripts/15_build_stutter_manifest.sh`, `scripts/16_eval_disfluency.sh`,
-  `tests/test_disfluency_smoke.py` (21/21). **Result rows in `RESULTS.md` = TBA.**
-```bash
-source scripts/_env.sh
-bash scripts/15_build_stutter_manifest.sh --fluent-per-file 3      # once
-bash scripts/16_eval_disfluency.sh                                  # frozen V-JEPA2 baseline
-bash scripts/16_eval_disfluency.sh --encoder $ARTI_OUT/runs/tssl_vitl_256/latest.pt --tag tssl256
-bash scripts/16_eval_disfluency.sh --model videomae --tag vmae_frozen
-bash scripts/16_eval_disfluency.sh --mode finetune --model videomae --tag vmae_ft
-```
-
-### 9. Pre/post-glossectomy phoneme classification (gloss) — **NOT STARTED (TBA)**
-Phoneme decoding evaluated **separately for pre- vs post-glossectomy** to quantify
-articulatory change and compensation.
-- **Data:** `/data1/span_data/gloss/spk{1,2,3}/{pre,post}/textgrids/*.TextGrid`
-  (spk2 has `post1`/`post2`). Tiers: `words` + `phones` (ARPABET + stress, MFA
-  forced-aligned). Paired video in `gloss/resampled_video`; ROIs in
-  `gloss/roi_boxes`,`gloss/roi_time_series`; SAM seg in `gloss/spkN/sam_seg`.
-- **Task:** per-token phoneme classification (same head/metrics as Task 2) run on
-  pre and on post; report the **pre→post Δ** in κ/PER/accuracy per speaker
-  (degradation under altered anatomy).
-- **Bonus:** binary **pre-vs-post condition classification** from features — a
-  proxy for whether the encoder captures compensatory articulation.
-- **Metric:** per-phoneme accuracy, **κ, PER**; pre vs post delta; per-speaker.
-- **Need:** `gloss.py` (parser + manifest, video pairing), `configs/eval_gloss.yaml`.
-
-### 10. Articulatory-condition JEPA — planning + eval metric — **PLANNING (TBA)**
-A **condition-aware JEPA**: encoder/predictor conditioned on articulatory condition
-{healthy-75spk, PWS-fluent, PWS-disfluent, gloss-pre, gloss-post}. Extends the
-AUC-JEPA (audio-conditioned) scaffolding from commit `d8f5efb`.
-- **Planning tasks:**
-  1. Define a condition embedding + injection point (FiLM / token-prepend in the
-     predictor; mirror AUC-JEPA's audio-conditioning path).
-  2. Build a unified multi-corpus manifest (75-spk + stuttering + gloss) with a
-     `condition` column; document in `Master.md`.
-  3. Train condition-conditioned predictor; ablate condition-on vs condition-off
-     (and shuffled-condition control) — pretraining plan in `TODO_pretraining.md`.
-- **Eval metrics (new):**
-  - **(i) Conditioning lift:** condition-held-out phoneme κ vs the unconditioned
-    encoder (does conditioning help downstream decode?).
-  - **(ii) Condition separability:** linear-probe condition accuracy + silhouette
-    of pooled features by condition.
-  - **(iii) Counterfactual error:** masked-target reconstruction error when the
-    condition token is swapped (pre↔post) — should rise if condition is used.
-  - **(iv) Few-shot transfer:** pre→post adaptation with k labeled clips.
-
-### 11. Acoustic-to-articulator inversion (AAI) — **NOT STARTED (TBA)**
-Predict the **articulatory representation from acoustics** (reverse of the
-silent-video phoneme task) — tests whether the JEPA latent lies on a shared
-acoustic–articulatory manifold.
-- **Input:** acoustic features (wav2vec2/WavLM or mel) from paired audio.
-- **Target (pick one):** frozen rtMRI **JEPA tokens**, or `gloss/roi_time_series`
-  / tongue contours / SAM landmarks, or usc_lss kinematics.
-- **Data:** corpora with paired audio — 75-spk corpus, gloss (`denoise_audio.py`
-  pipeline), usc_lss (ships contours/kinematics).
-- **Metric:** standard AAI **Pearson correlation** (per-articulator, mean) +
-  **RMSE**; for JEPA-token targets also cosine/MSE. Correlation is the headline.
-- **Need:** an audio feature extractor (decoupled, transformers-compatible env)
-  + a regression head (`aai.py`, `configs/eval_aai.yaml`). **`RESULTS.md` = TBA.**
+### 3. Task-1 pseudo labels — **NOT STARTED (TBA)**
+The in-domain transfer probe (no gold alignment → where CTC should pay off).
+- Run `audio_phoneme.build_pseudo_labels(manifest_split.csv)` in a
+  transformers-compatible env (`transformers<5` or torch≥2.7) → cache to
+  `/scratch1/hongn/artijepa/pseudo_phonemes/`.
+- Then eval with `configs/eval_phoneme_pseudo.yaml` (kind: pseudo) on pretrained
+  + tssl_128/256. **Result rows in `RESULTS.md` = TBA.**
+- Re-test CTC here (the head×loss ablation found CTC worse *only because* gold
+  alignment was available; pseudo is the no-alignment case CTC is built for).
 
 ---
 
@@ -215,25 +127,8 @@ drivers `scripts/05_eval_baselines.sh`, `eval/run_baselines_spatial.sh`.
 | supervised ViT-L/16 | 224 | ✅ κ 0.368 (best baseline) | ❌ **NOT STARTED — key competitor** |
 | siglip-L/16 | 256 | ✅ κ 0.313 | ⚠ tcn_spatial 3/3; attentive 1/3 |
 | clip-L/14 | 224 | ✅ κ 0.293 | ✅ 3/3 (tcn_spatial 0.345) |
-| dinov2-L/14 (DINOv3 unavailable) | 518 | ✅ κ 0.291 | ❌ REMOVE, NOT RUN |
-| resnet-50 | 224 | ✅ κ 0.304 | ❌ REMOVE, NOT RUN |
-
-## Video model baseline — VideoMAE (added 2026-06-30)
-`artijepa/videomae_baseline.py` (transformers `VideoMAEModel`, **video** 3-D tubelet
-encoder, not per-frame). The generic video-SSL competitor to Arti-JEPA's video-JEPA.
-Default `MCG-NJU/videomae-large` (ViT-L, D=1024, 16f, tubelet 2, patch 16 →
-8×14×14 tokens). Same input contract as the image baselines (minmax→[0,1] +
-ImageNet mean/std, resize 224). Native geometry (224px/16f) overrides the 256px
-config — that's the baseline's best shot. Two modes on the disfluency task:
-
-| model | mode | phoneme (usc_lss) | disfluency (Task 8) |
-|---|---|---|---|
-| VideoMAE-L/16 | **frozen** (attentive probe) | TBA (optional) | ❌ TBA |
-| VideoMAE-L/16 | **fine-tune** (encoder + head) | — | ❌ TBA |
-
-Frozen exposes `.backbone(clip)` (drop-in for the extractor); fine-tune trains the
-encoder end-to-end (`--mode finetune`, `encoder_lr` ≪ head `lr`). Run via
-`scripts/16_eval_disfluency.sh --model videomae [--mode finetune]`.
+| dinov2-L/14 (DINOv3 unavailable) | 518 | ✅ κ 0.291 | ❌ NOT STARTED |
+| resnet-50 | 224 | ✅ κ 0.304 | ❌ NOT STARTED |
 
 ---
 

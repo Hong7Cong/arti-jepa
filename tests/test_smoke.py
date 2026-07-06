@@ -20,8 +20,8 @@ import tempfile
 import numpy as np
 import torch
 
-DATA_ROOT = os.environ.get("ARTI_DATA_ROOT", "/scratch1/hongn/speaker75")
-OUT = os.environ.get("ARTI_OUT", "/scratch1/hongn/artijepa")
+DATA_ROOT = os.environ.get("ARTI_DATA_ROOT", "/data1/span_data/rtmri75s")
+OUT = os.environ.get("ARTI_OUT", "/data2/hongn/artijepa")
 
 PASS, FAIL = "\033[92mPASS\033[0m", "\033[91mFAIL\033[0m"
 results = []

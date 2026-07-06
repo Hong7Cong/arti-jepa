@@ -13,9 +13,9 @@ sits in two corpora and is flagged loudly (``--strict`` makes it fatal).
 
 Usage:
     python -m artijepa.merge_manifests \
-        --inputs /scratch1/hongn/artijepa/manifest_alltrain.csv \
-                 /scratch1/hongn/artijepa/manifest_longitudinal.csv \
-        --out /scratch1/hongn/artijepa/manifest_combined.csv
+        --inputs /data2/hongn/artijepa/manifest_alltrain.csv \
+                 /data2/hongn/artijepa/manifest_longitudinal.csv \
+        --out /data2/hongn/artijepa/manifest_combined.csv
 """
 
 import argparse

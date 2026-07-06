@@ -1,7 +1,7 @@
 # T-SSL ablation: ViT-L @ 128px / 32f. ~4x fewer tokens than 256px (8x8 grid),
 # so masks are re-tuned (see masking.mask_config_for) and batch size can grow.
 meta:
-  folder: /scratch1/hongn/artijepa/runs/tssl_vitl_128
+  folder: /data2/hongn/artijepa/runs/tssl_vitl_128
   seed: 0
   dtype: float16
   eval_freq: 1
@@ -12,8 +12,8 @@ meta:
   snapshot_freq: null     # if set, also keep epoch_NN.pt every N epochs (history)
 
 data:
-  manifest: /scratch1/hongn/artijepa/manifest_split.csv
-  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats_128.json
+  manifest: /data2/hongn/artijepa/manifest_split.csv
+  grayscale_stats: /data2/hongn/artijepa/grayscale_stats_128.json
   spatial_size: 128
   spatial_mode: resize
   frames_per_clip: 32

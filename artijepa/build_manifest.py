@@ -6,8 +6,8 @@ Output columns:
 
 Usage:
     python -m artijepa.build_manifest \
-        --data-root /scratch1/hongn/speaker75 \
-        --out /scratch1/hongn/artijepa/manifest.csv --probe
+        --data-root /data1/span_data/rtmri75s \
+        --out /data2/hongn/artijepa/manifest.csv --probe
 """
 
 import argparse
@@ -106,8 +106,8 @@ def build(data_root: str, out: str, metafile: str = None, probe: bool = False):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data-root", default="/scratch1/hongn/speaker75")
-    ap.add_argument("--out", default="/scratch1/hongn/artijepa/manifest.csv")
+    ap.add_argument("--data-root", default="/data1/span_data/rtmri75s")
+    ap.add_argument("--out", default="/data2/hongn/artijepa/manifest.csv")
     ap.add_argument("--metafile", default=None)
     ap.add_argument("--probe", action="store_true",
                     help="open each video with decord to record fps/n_frames")

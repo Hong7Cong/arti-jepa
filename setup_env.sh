@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Create the `artijepa` conda env with V100-compatible (CUDA 12.x) PyTorch.
+# Create the `artijepa` conda env with CUDA 12.x PyTorch.
 #
-# Why a new env: the existing vjepa2-312 ships torch 2.12+cu130, which cannot
-# drive this node's Tesla V100 (driver 575.x => CUDA 12.9). We pin torch 2.6.0
-# +cu124 (compute capability 7.0 supported) so the V100 is usable for T-SSL.
+# This server has 4x NVIDIA RTX 6000 Ada (compute capability 8.9, driver
+# CUDA 13.0). torch 2.6.0+cu124 supports sm_89 and runs against the cu13
+# driver, so we keep the same pin the project was validated with.
 #
-# Usage:  bash dev_artiJEPA/setup_env.sh
+# Usage:  bash setup_env.sh
 set -euo pipefail
 
-CONDA_SH="/apps/conda/miniforge3/25.3.0/etc/profile.d/conda.sh"
-ENV_PREFIX="/scratch1/hongn/conda/envs/artijepa"   # keep envs off /home1 quota
+CONDA_SH="/data2/hongn/miniconda3/etc/profile.d/conda.sh"
+ENV_PREFIX="/data2/hongn/miniconda3/envs/artijepa"   # default envs dir -> `conda activate artijepa`
 PY_VER="3.11"
 
 source "${CONDA_SH}"

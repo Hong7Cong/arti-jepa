@@ -1,7 +1,7 @@
 # T-SSL: domain-adaptive V-JEPA pre-training on rtMRI, ViT-L @ 256px / 32f.
 # Primary config (Arti-JEPA Phase 3, headline "with-T-SSL" run).
 meta:
-  folder: /scratch1/hongn/artijepa/runs/tssl_vitl_256
+  folder: /data2/hongn/artijepa/runs/tssl_vitl_256
   seed: 0
   dtype: float16          # V100 (Volta) has no bf16 tensor cores -> fp16 + GradScaler
   eval_freq: 1            # run label-free collapse diagnostics every N epochs
@@ -16,8 +16,8 @@ data:
   # checkpoint in runs/tssl_vitl_256). WITH-longitudinal arm =
   # configs/tssl_vitl_256_combined.yaml (manifest_combined.csv,
   # runs/tssl_vitl_256_combined, epochs 215).
-  manifest: /scratch1/hongn/artijepa/manifest_alltrain.csv  # all-data pretrain (val 0.05 / test 0; 71 train + 4 val subjects)
-  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
+  manifest: /data2/hongn/artijepa/manifest_alltrain.csv  # all-data pretrain (val 0.05 / test 0; 71 train + 4 val subjects)
+  grayscale_stats: /data2/hongn/artijepa/grayscale_stats.json
   spatial_size: 256
   spatial_mode: resize
   frames_per_clip: 32
@@ -38,7 +38,7 @@ data:
 model:
   model_name: vit_large
   pretrained: true
-  checkpoint: null        # auto-download vitl.pt to /scratch1/hongn/artijepa/checkpoints
+  checkpoint: null        # auto-download vitl.pt to /data2/hongn/artijepa/checkpoints
   checkpoint_key: target_encoder
   use_activation_checkpointing: true
 

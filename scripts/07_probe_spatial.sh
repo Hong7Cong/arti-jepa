@@ -15,9 +15,9 @@ CFG="${DEV_DIR}/configs/eval_phoneme_usc_lss.yaml"
 if [[ "${1:-}" == *.yaml ]]; then CFG="$1"; shift; fi
 # T-SSL checkpoint: pick 256 if the config is the 256px one, else 128
 if [[ "$CFG" == *_256* ]]; then
-  TSSL=/scratch1/hongn/artijepa/runs/tssl_vitl_256/latest.pt; RES=256
+  TSSL=/data2/hongn/artijepa/runs/tssl_vitl_256/latest.pt; RES=256
 else
-  TSSL=/scratch1/hongn/artijepa/runs/tssl_vitl_128/latest.pt; RES=128
+  TSSL=/data2/hongn/artijepa/runs/tssl_vitl_128/latest.pt; RES=128
 fi
 
 HEADS=("$@")
