@@ -317,9 +317,9 @@ def train(cfg):
             if os.path.exists(ckpt_path):              # one-deep backup
                 os.replace(ckpt_path, ckpt_path + ".prev")
             os.replace(ckpt_path + ".tmp", ckpt_path)  # atomic install
-            snap = meta.get("snapshot_freq")           # optional epoch_NN.pt history
+            snap = meta.get("snapshot_freq")           # optional ckpt_NN.pt history
             if snap and (epoch + 1) % snap == 0:
-                shutil.copyfile(ckpt_path, os.path.join(folder, f"epoch_{epoch+1}.pt"))
+                shutil.copyfile(ckpt_path, os.path.join(folder, f"ckpt_{epoch+1}.pt"))
         print(f"[tssl] epoch {epoch+1} avg loss {running/max(1, n_seen):.4f}")
         if max_steps and global_step >= max_steps:
             break

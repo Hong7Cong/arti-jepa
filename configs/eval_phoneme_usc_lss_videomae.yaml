@@ -1,0 +1,40 @@
+# Phoneme-prediction eval, Task 2 (GOLD, OOD usc_lss) -- VIDEOMAE VIDEO BASELINE.
+# Frozen 3-D VideoMAE-L (16f / tubelet 2 / patch 16, 224px) -- the generic video-SSL
+# competitor to Arti-JEPA's video-JEPA, vs the per-frame image baselines. Run with
+# `--model videomae --tag videomae` (spatial_size/frames_per_clip/tubelet are fixed
+# to VideoMAE's native geometry inside load_frozen_encoder). Same probe + labels.
+meta:
+  out: /scratch1/hongn/artijepa/eval
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/phoneme
+  seed: 0
+  dtype: float16          # V100 (no bf16); fine for frozen feature extraction
+  tag: videomae
+
+data:
+  kind: usc_lss
+  manifest: /scratch1/hongn/usc_lss/phoneme_manifest.csv
+  # spatial_size / frames_per_clip / tubelet_size below are OVERRIDDEN to VideoMAE's
+  # native 224px / 16f / tubelet 2 (-> T'=8 tokens) in load_frozen_encoder.
+  spatial_size: 224
+  spatial_mode: resize
+  intensity_norm: minmax
+  frames_per_clip: 16     # 16f @ 25 fps = 0.64 s window; tubelet 2 -> 8 tokens @ 80 ms
+  target_fps: 25.0        # seconds-based align (matches image baselines' 80 ms token rate)
+  tubelet_size: 2
+  patch_size: 16
+  batch_size: 4           # extraction batch (VideoMAE-L 16f is heavier than per-frame)
+  num_workers: 2          # 16 GB host-RAM cap
+
+encoder:
+  type: videomae          # triggers the VideoMAE video-baseline path
+  model: MCG-NJU/videomae-large
+  grid_cap: 16            # 14x14 native <= cap -> untouched
+
+probe:                    # identical to the V-JEPA eval -> apples-to-apples
+  type: attentive
+  epochs: 40
+  warmup: 4
+  lr: 1.0e-3
+  wd: 0.01
+  hidden: 512
+  batch_size: 32

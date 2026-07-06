@@ -11,7 +11,12 @@ meta:
   probe_max_batches: 20   # held-out clips for collapse metrics
   max_steps: null         # bound wall-clock per allocation if needed (CLI --max-steps)
   resume: null            # set to runs/tssl_vitl_256_combined/latest.pt to CONTINUE
-  snapshot_freq: null     # if set, also keep epoch_NN.pt every N epochs (history)
+  snapshot_freq: 50       # also keep ckpt_NN.pt every N epochs (history). Takes effect
+                          # on the next resume; the in-flight run is covered by
+                          # runs/.../snapshot_every60.sh (same ckpt_NN.pt naming).
+                          # Set 60->50 (2026-07-01): resuming from ep77, the next multiples
+                          # of 50 are 100/150/200 (50 already passed, 250 > 215 epochs) ->
+                          # yields exactly the requested ckpt_100/150/200.pt.
 
 data:
   # rtMRI-75 all-train + longitudinal (21 disjoint speakers), every row split=train.
@@ -30,10 +35,20 @@ data:
   intensity_norm: zscore
   augment: true
   batch_size: 32          # micro-batch. V100-32GB: act-ckpt MANDATORY at 256px.
-                          # accum = eff/bs = 4 (eff_batch 128). bs64 OOMs.
-  probe_batch_size: 8     # batch for the held-out collapse-monitor loader
-  num_workers: 2          # SLURM job capped at 16 GB host RAM; 256px clips are big
-  pin_mem: false          # pinned workers OOM'd the cgroup at 256px -> 2 workers, no pin
+                          # Raised 16->32 on resume (2026-06-27) after the SLURM job got
+                          # 64 GB host RAM + 32 cores -> push GPU utilization. bs32 peaks
+                          # ~24.5 GB on the 32 GB V100 (~7 GB headroom); the original bs32
+                          # OOM (combined run, epoch 1) was fragmentation, now mitigated by
+                          # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True (launcher
+                          # default). accum = eff/bs = 4 (eff_batch 128 unchanged); ipe is
+                          # lowered 1000->500 below so oue stays 125/epoch and the 215-epoch
+                          # LR/EMA schedule is byte-for-byte identical -> resumes cleanly
+                          # from the bs16 latest.pt. If bs32 OOMs, revert to bs16/ipe1000.
+                          # bs64 OOMs.
+  probe_batch_size: 16    # batch for the held-out collapse-monitor loader (raised 8->16)
+  num_workers: 12         # 32 cores / 64 GB host RAM -> saturate the data pipeline (was 2
+                          # under the old 16 GB cap). persistent main loader = 12 workers.
+  pin_mem: true           # 64 GB host RAM -> pin for faster H2D (was false under 16 GB cap)
 
 model:
   model_name: vit_large
@@ -48,12 +63,14 @@ loss:
   loss_exp: 1.0           # L1 feature loss
 
 optimization:
-  # 215 epochs x ipe 500 x bs 32 = 3.44M chunk-samples = ~10 passes over the 343k
+  # 215 epochs x ipe 1000 x bs 16 = 3.44M chunk-samples = ~10 passes over the 343k
   # pool (~99.995% of chunks seen). Schedule horizon is oue*epochs = 125*215 =
-  # 26,875 optimizer-updates; cosine LR is stretched over the full run.
+  # 26,875 optimizer-updates; cosine LR is stretched over the full run. (ipe/bs were
+  # rescaled 500/32 -> 1000/16 for OOM headroom; oue=125/epoch and the horizon are
+  # unchanged, so this is the SAME optimization, just a smaller micro-batch.)
   epochs: 215
   ipe: 500                # micro-batches/epoch (fixed); /accum 4 -> 125 oue/epoch
-  effective_batch: 128    # grad-accum: accum_steps = effective_batch / batch_size = 4
+  effective_batch: 128    # grad-accum: accum_steps = effective_batch / batch_size = 8
   lr: 5.0e-4              # cosine
   start_lr: 1.0e-4
   final_lr: 1.0e-5

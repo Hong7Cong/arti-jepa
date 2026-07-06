@@ -55,7 +55,7 @@ def test_state_action():
     check("action = diff", torch.allclose(a, e[:, 1:] - e[:, :-1]))
 
 
-def _build(device="cpu", img=96, patch=16, frames=16, tub=2, A=32):
+def _build(device="cpu", img=96, patch=16, frames=16, tub=2, A=32, cond_mode="concat"):
     from artijepa.audio_cond import AudioConditionedPredictor
     from artijepa.model import build_models
     encoder, _ = build_models(device=torch.device(device), model_name="vit_tiny",
@@ -68,7 +68,8 @@ def _build(device="cpu", img=96, patch=16, frames=16, tub=2, A=32):
     pred = AudioConditionedPredictor(
         img_size=img, patch_size=patch, num_frames=frames, tubelet_size=tub,
         embed_dim=encoder.embed_dim, action_embed_dim=A, pred_embed_dim=64,
-        depth=2, num_heads=4, use_rope=True, frame_causal=True).to(device)
+        depth=2, num_heads=4, use_rope=True, frame_causal=True,
+        cond_mode=cond_mode).to(device)
     return encoder, pred, A
 
 
@@ -134,12 +135,62 @@ def test_frozen_step():
           f"{n_pred_grad}/{n_pred_req}")
 
 
+def test_cond_modes():
+    """film / cross_attn conditioning: same rollout shapes as concat, encoder stays
+    frozen, and the mode-specific audio params (film / xattn / gate) receive grad."""
+    import torch.nn.functional as F
+    from artijepa.audio_cond import rollout_l1, to_state_action
+    B, frames, img, patch, tub = 2, 16, 96, 16, 2
+    Tp, hw = frames // tub, (img // patch) ** 2
+    for mode in ("film", "cross_attn"):
+        torch.manual_seed(0)
+        enc, pred, A = _build(cond_mode=mode)
+        check(f"[{mode}] cond_mode set", pred.cond_mode == mode)
+        clip = torch.randn(B, 3, frames, img, img)
+        audio = torch.randn(B, Tp, A)
+        valid = torch.ones(B, Tp, dtype=torch.bool)
+        with torch.no_grad():
+            h = F.layer_norm(enc.backbone(clip), (enc.embed_dim,))
+        D = h.size(-1)
+        state, action = to_state_action(audio)
+        # ctx=1 (the new run's setting): seed 1 real frame, predict the other T'-1
+        z_tf, z_ar, ar0 = pred.forward_predictions(h, state, action, ctx_frames=1)
+        check(f"[{mode}] z_tf shape", z_tf.shape == (B, (Tp - 1) * hw, D), f"{tuple(z_tf.shape)}")
+        check(f"[{mode}] ctx=1 z_ar shape", z_ar.shape == (B, (Tp - 1) * hw, D) and ar0 == 1,
+              f"{tuple(z_ar.shape)} ar0={ar0}")
+        loss = (rollout_l1(z_tf, h, hw, valid, start_frame=1)
+                + rollout_l1(z_ar, h, hw, valid, start_frame=ar0))
+        loss.backward()
+        check(f"[{mode}] loss finite", torch.isfinite(loss).item(), f"loss={float(loss):.4f}")
+        check(f"[{mode}] encoder frozen (no grads)",
+              sum(1 for p in enc.parameters() if p.grad is not None) == 0)
+        if mode == "film":
+            g = pred.film[0].weight.grad
+            check("[film] FiLM generator grad finite",
+                  g is not None and torch.isfinite(g).all().item())
+        else:
+            xg = pred.xattn_gate[0].grad
+            xq = pred.xattn[0].in_proj_weight.grad
+            check("[cross_attn] gate + attn grads finite",
+                  xg is not None and torch.isfinite(xg).all().item()
+                  and xq is not None and torch.isfinite(xq).all().item())
+
+
+def test_concat_unchanged():
+    """concat mode must call the stock backbone verbatim (no new params added)."""
+    _, pred_c, _ = _build(cond_mode="concat")
+    has_extra = any(hasattr(pred_c, a) for a in ("film", "xattn", "xattn_gate"))
+    check("[concat] no film/xattn modules added", not has_extra)
+
+
 def main():
     print("== AC-JEPA-audio smoke test ==")
     print("[1] audio pooling/alignment"); test_pooling()
     print("[2] state/action");            test_state_action()
     print("[3] predictor forward");       test_predictor_forward()
     print("[4] frozen-encoder step");     test_frozen_step()
+    print("[5] film/cross_attn modes");   test_cond_modes()
+    print("[6] concat unchanged");        test_concat_unchanged()
     n_pass = sum(ok for _, ok in results)
     print(f"\n{n_pass}/{len(results)} checks passed")
     if n_pass != len(results):

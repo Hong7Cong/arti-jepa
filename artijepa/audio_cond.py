@@ -73,12 +73,25 @@ def normalize_audio(e, mean, std, eps=1e-6):
 # --------------------------------------------------------------------------- #
 # 2. state / action construction  (torch; batched in the train loop)
 # --------------------------------------------------------------------------- #
-def to_state_action(e):
+def to_state_action(e, use_action=True):
     """``e[B, T', A]`` -> (state ``[B,T',A]`` absolute, action ``[B,T'-1,A]`` delta).
 
     Audio embeddings are (approximately) Euclidean, so the V-JEPA 2-AC manifold
     ``poses_to_diffs`` collapses to plain subtraction (no SO(3) correction).
+
+    ``use_action=False`` -> **state-only** conditioning (no delta pathway). We shift
+    the audio forward one token so that when the predictor emits frame *t* (from
+    context position *t-1*) the last context slot carries the SYNCHRONOUS audio
+    ``e[t]`` -- otherwise simply dropping the action would leave frame *t* seeing
+    only ``e[t-1]`` (a 1-token / ~20 ms lag). The last slot is padded with ``e[-1]``.
+    The action is zeroed rather than removed, so ``add_tokens`` stays 2 and the AC
+    predictor + its checkpoint are reused verbatim (the action token degenerates to
+    a constant bias). This is the fair state-vs-state+action ablation.
     """
+    if not use_action:
+        state = torch.cat([e[:, 1:], e[:, -1:]], dim=1)   # [B,T',A]  state[p]=e[p+1]
+        action = torch.zeros_like(e[:, 1:])               # [B,T'-1,A] action off
+        return state, action
     state = e
     action = e[:, 1:] - e[:, :-1]
     return state, action
@@ -95,12 +108,31 @@ class AudioConditionedPredictor(nn.Module):
     ``A``, so they drop in unchanged (``add_tokens=2``). Frame-causal attention +
     3-axis RoPE come for free. Owns ``forward_predictions`` (teacher-forced + AR
     rollout), mirroring ``app/vjepa_droid/train.py``.
+
+    ``cond_mode`` selects HOW the audio reaches the predictor (all three reuse the
+    same ``forward_predictions`` rollout + the same A->D state/action encoders):
+
+    * ``concat`` (default) -- the stock path: per frame, prepend the (action,state)
+      audio tokens to that frame's H*W visual tokens and let self-attention mix them
+      (``add_tokens=2``, ``VisionTransformerPredictorAC.forward`` verbatim).
+    * ``film`` -- per-block, per-channel Feature-wise Linear Modulation. The audio
+      embedding emits ``(gamma, beta)`` per frame that scale/shift the visual tokens
+      before each block (adaLN-zero style; zero-init -> starts at identity). No audio
+      tokens are added, so the blocks run ``action_tokens=0``.
+    * ``cross_attn`` -- each block is followed by a cross-attention sublayer where the
+      visual tokens (queries) attend the per-frame audio embeddings (keys/values),
+      frame-causal, gated by a zero-init scalar so audio starts as a no-op.
+
+    ``film``/``cross_attn`` add fresh trainable params (the predictor is trained from
+    scratch every run, so no checkpoint key compatibility is required); ``concat`` is
+    untouched. See ``_forward_conditioned``.
     """
 
     def __init__(self, img_size, patch_size, num_frames, tubelet_size, embed_dim,
                  action_embed_dim, pred_embed_dim=384, depth=12, num_heads=12,
                  use_rope=True, frame_causal=True, use_activation_checkpointing=False,
-                 use_extrinsics=False, spk_dim=None, normalize_reps=True):
+                 use_extrinsics=False, spk_dim=None, normalize_reps=True,
+                 cond_mode="concat", cross_attn_heads=None):
         super().__init__()
         from src.models.ac_predictor import vit_ac_predictor
         self.backbone = vit_ac_predictor(
@@ -122,11 +154,92 @@ class AudioConditionedPredictor(nn.Module):
         self.tokens_per_frame = gh * gw
         self.normalize_reps = normalize_reps
 
+        assert cond_mode in ("concat", "film", "cross_attn"), \
+            f"cond_mode={cond_mode!r} not in (concat, film, cross_attn)"
+        self.cond_mode = cond_mode
+        if cond_mode != "concat":
+            from src.models.utils.modules import build_action_block_causal_attention_mask
+            D = pred_embed_dim
+            # frame-causal self-attn mask over the H*W visual tokens per frame ONLY
+            # (no prepended audio tokens -> add_tokens=0); sliced to N per call.
+            Tmax = num_frames // tubelet_size
+            self.register_buffer(
+                "cond_attn_mask",
+                build_action_block_causal_attention_mask(Tmax, gh, gw, add_tokens=0),
+                persistent=False)
+            if cond_mode == "film":
+                # one per-block FiLM generator; zero-init -> gamma=beta=0 = identity,
+                # audio effect is learned from scratch (adaLN-zero).
+                self.film = nn.ModuleList(nn.Linear(D, 2 * D) for _ in range(depth))
+                for lin in self.film:
+                    nn.init.zeros_(lin.weight)
+                    nn.init.zeros_(lin.bias)
+            else:  # cross_attn
+                nh = int(cross_attn_heads or num_heads)
+                self.xattn = nn.ModuleList(
+                    nn.MultiheadAttention(D, nh, batch_first=True) for _ in range(depth))
+                self.xattn_norm = nn.ModuleList(nn.LayerNorm(D) for _ in range(depth))
+                # zero-init gate -> cross-attn contributes nothing at start, learned on.
+                self.xattn_gate = nn.ParameterList(
+                    nn.Parameter(torch.zeros(1)) for _ in range(depth))
+
     def forward(self, x, actions, states, extrinsics=None):
-        return self.backbone(x, actions, states, extrinsics)
+        return self._predict(x, actions, states, extrinsics)
+
+    def _predict(self, z, a, s, e=None):
+        """Dispatch one predictor call on ``cond_mode`` (concat = stock backbone)."""
+        if self.cond_mode == "concat":
+            return self.backbone(z, a, s, e)
+        return self._forward_conditioned(z, a, s, e)
+
+    def _xattn_block_mask(self, N, hw, T, device):
+        """Bool ``[N, T]`` for ``nn.MultiheadAttention`` (True = FORBIDDEN): a query
+        token at frame ``t = n // hw`` may attend audio frames ``0..t`` (frame-causal,
+        mirrors the self-attention mask). Row ``t`` always keeps its own frame, so no
+        query is fully masked (no softmax NaN)."""
+        q_frame = torch.arange(N, device=device) // hw            # [N]
+        a_frame = torch.arange(T, device=device)                  # [T]
+        return a_frame[None, :] > q_frame[:, None]                # [N, T]
+
+    def _forward_conditioned(self, x, actions, states, extrinsics=None):
+        """FiLM / cross-attention audio conditioning (no per-frame audio tokens).
+
+        Mirrors ``VisionTransformerPredictorAC.forward`` but injects the WavLM audio
+        via feature-wise modulation (``film``) or cross-attention (``cross_attn``)
+        instead of concatenating action/state tokens. Self-attention runs with
+        ``action_tokens=0`` (plain frame-causal spatial-RoPE over the H*W visual
+        tokens); the A->D ``state_encoder``/``action_encoder`` are reused to build the
+        per-frame audio embedding. Both injection paths are zero-initialised, so
+        training starts as a pure visual predictor and must LEARN to use the audio.
+        """
+        bb = self.backbone
+        x = bb.predictor_embed(x)                                 # [B, N, D]
+        B, N, D = x.size()
+        H, W = bb.grid_height, bb.grid_width
+        hw = H * W
+        T = N // hw
+        audio_emb = bb.state_encoder(states) + bb.action_encoder(actions)   # [B, T, D]
+        attn_mask = self.cond_attn_mask[:N, :N].to(x.device, non_blocking=True)
+        xmask = (self._xattn_block_mask(N, hw, T, x.device)
+                 if self.cond_mode == "cross_attn" else None)
+        for i, blk in enumerate(bb.predictor_blocks):
+            if self.cond_mode == "film":
+                g, b = self.film[i](audio_emb).chunk(2, dim=-1)   # [B,T,D] each
+                g = g.repeat_interleave(hw, dim=1)                # [B,N,D]
+                b = b.repeat_interleave(hw, dim=1)
+                x = (1.0 + g) * x + b
+            x = blk(x, mask=None, attn_mask=attn_mask, T=T, H=H, W=W, action_tokens=0)
+            if self.cond_mode == "cross_attn":
+                q = self.xattn_norm[i](x)
+                ctx, _ = self.xattn[i](q, audio_emb, audio_emb, attn_mask=xmask,
+                                       need_weights=False)
+                x = x + self.xattn_gate[i] * ctx
+        x = bb.predictor_norm(x)
+        x = bb.predictor_proj(x)
+        return x
 
     def _step(self, z, a, s, e=None):
-        z = self.backbone(z, a, s, e)
+        z = self._predict(z, a, s, e)
         if self.normalize_reps:
             z = F.layer_norm(z, (z.size(-1),))
         return z

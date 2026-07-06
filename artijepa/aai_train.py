@@ -11,7 +11,7 @@ predict next-frame tokens conditioned on per-frame WavLM audio (``state=e[t]``,
 
 Run:
     source dev_artiJEPA/scripts/_env.sh
-    python -m artijepa.aucjepa_train --config dev_artiJEPA/configs/aucjepa_vitl_128.yaml
+    python -m artijepa.aai_train --config dev_artiJEPA/configs/aai_wavlm_256_combined_ctx2.yaml
 """
 
 import argparse
@@ -113,7 +113,7 @@ def build_audio_loader(cfg, split, audio_dir, shuffle, drop_last):
 
 @torch.no_grad()
 def run_diagnostics(encoder, predictor, loader, device, dtype, mixed, auto_steps,
-                    hw, ctx_frames=None, max_batches=8):
+                    hw, ctx_frames=None, max_batches=8, use_action=True):
     """Audio-conditioned future-pred L1 with REAL vs SHUFFLED audio (plan §10).
 
     A large real-vs-shuffled gap = the predictor actually uses the acoustics. The
@@ -132,13 +132,13 @@ def run_diagnostics(encoder, predictor, loader, device, dtype, mixed, auto_steps
         with torch.autocast(device_type=device.type, dtype=dtype, enabled=mixed):
             h = encoder.backbone(clips)
             h = F.layer_norm(h, (h.size(-1),))
-            st, ac = to_state_action(audio)
+            st, ac = to_state_action(audio, use_action)
             z_tf, z_ar, ar0 = predictor.forward_predictions(h, st, ac, auto_steps, ctx_frames)
             real_tf.append(float(rollout_l1(z_tf, h, hw, valid, start_frame=1)))
             real_ar.append(float(rollout_l1(z_ar, h, hw, valid, start_frame=ar0)))
             # shuffled audio across the batch (break the video<->audio pairing)
             perm = torch.randperm(audio.size(0), device=device)
-            st_s, ac_s = to_state_action(audio[perm])
+            st_s, ac_s = to_state_action(audio[perm], use_action)
             _, z_ar_s, _ = predictor.forward_predictions(h, st_s, ac_s, auto_steps, ctx_frames)
             shuf_ar.append(float(rollout_l1(z_ar_s, h, hw, valid, start_frame=ar0)))
     predictor.train()
@@ -167,6 +167,10 @@ def train(cfg):
 
     audio_dir = audio_c["cache_dir"]
     A = int(audio_c.get("dim", 768))
+    # state-only ablation: condition on the (synchronous) WavLM embedding only,
+    # dropping the delta/action pathway (audio_cond.to_state_action).
+    use_action = bool(audio_c.get("use_action", True))
+    print(f"[aucjepa] use_action={use_action} (False -> state-only, synchronous audio)")
     auto_steps = int(opt_c.get("auto_steps", 2))
     # context-prefix rollout (plan §4): seed ctx_frames real frames, predict the
     # rest from audio only -> makes audio causally necessary. None -> droid AR.
@@ -191,6 +195,10 @@ def train(cfg):
           f"batch={bs} x accum={accum_steps} -> eff_batch={bs*accum_steps}, {oue} oue")
 
     # -- models: frozen encoder + trainable AC predictor
+    # cond_mode selects how the audio conditions the predictor: concat (stock audio
+    # tokens), film (feature-wise modulation), or cross_attn (visual->audio attention).
+    cond_mode = pred_c.get("cond_mode", "concat")
+    print(f"[aucjepa] cond_mode={cond_mode} (concat=stock tokens / film / cross_attn)")
     encoder = build_frozen_encoder(cfg, device)
     predictor = AudioConditionedPredictor(
         img_size=data["spatial_size"], patch_size=data.get("patch_size", 16),
@@ -200,13 +208,14 @@ def train(cfg):
         depth=pred_c.get("pred_depth", 12), num_heads=pred_c.get("pred_num_heads", 12),
         use_rope=pred_c.get("use_rope", True), frame_causal=pred_c.get("frame_causal", True),
         use_activation_checkpointing=model_c.get("use_activation_checkpointing", False),
+        cond_mode=cond_mode, cross_attn_heads=pred_c.get("cross_attn_heads"),
     ).to(device)
     hw = predictor.tokens_per_frame
     n_train = sum(p.numel() for p in predictor.parameters() if p.requires_grad)
     n_enc = sum(p.numel() for p in encoder.parameters())
     print(f"[aucjepa] trainable predictor params {n_train/1e6:.1f}M; "
           f"frozen encoder params {n_enc/1e6:.1f}M; tokens/frame={hw}, A={A}, "
-          f"auto_steps={auto_steps}, ctx_frames={ctx_frames}")
+          f"auto_steps={auto_steps}, ctx_frames={ctx_frames}, cond_mode={cond_mode}")
 
     optimizer, scaler, scheduler, wd_scheduler = init_opt_predictor_only(
         predictor, iterations_per_epoch=oue, start_lr=opt_c["start_lr"],
@@ -261,7 +270,7 @@ def train(cfg):
                 with torch.no_grad():                          # frozen perceptual target
                     h = encoder.backbone(clips)                # [B, T'*HW, D]
                     h = F.layer_norm(h, (h.size(-1),))
-                state, action = to_state_action(audio)         # [B,T',A], [B,T'-1,A]
+                state, action = to_state_action(audio, use_action)   # [B,T',A], [B,T'-1,A]
                 z_tf, z_ar, ar0 = predictor.forward_predictions(
                     h, state, action, auto_steps, ctx_frames)
                 jloss = rollout_l1(z_tf, h, hw, valid, loss_exp, start_frame=1)
@@ -299,7 +308,8 @@ def train(cfg):
         if monitor_loader is not None and (epoch + 1) % meta.get("eval_freq", 1) == 0:
             diag = run_diagnostics(encoder, predictor, monitor_loader, device, dtype,
                                    mixed, auto_steps, hw, ctx_frames=ctx_frames,
-                                   max_batches=meta.get("probe_max_batches", 8))
+                                   max_batches=meta.get("probe_max_batches", 8),
+                                   use_action=use_action)
             print(f"[e{epoch+1}] diagnostics: {diag}")
             with open(os.path.join(folder, "diagnostics.jsonl"), "a") as df:
                 df.write(json.dumps({"epoch": epoch + 1, **diag}) + "\n")

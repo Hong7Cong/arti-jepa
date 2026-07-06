@@ -52,6 +52,31 @@ def load_config(path):
 # --------------------------------------------------------------------------- #
 def load_frozen_encoder(cfg, device):
     d, ec = cfg["data"], cfg["encoder"]
+    if ec.get("type") == "videomae":
+        # Frozen 3-D VideoMAE video encoder (the video-SSL baseline, vs the per-frame
+        # image baselines). Native geometry (224px / 16 frames / tubelet 2) is fixed by
+        # the model's positional embeddings, so it OVERRIDES the config's
+        # spatial_size/frames_per_clip/tubelet_size. pool_spatial (set by run() from the
+        # probe head) selects pooled [B,T',D] vs the un-pooled [B,T',S',D] grid.
+        from artijepa.videomae_baseline import VideoMAEEncoder, VIDEOMAE_LARGE
+        enc = VideoMAEEncoder(ec.get("model", VIDEOMAE_LARGE),
+                              pool_spatial=d.get("pool_spatial", True),
+                              grid_cap=ec.get("grid_cap", 16)).to(device)
+        enc.eval()
+        for p in enc.parameters():
+            p.requires_grad = False
+        d["spatial_size"] = enc.backbone.input_size            # 224
+        d["frames_per_clip"] = enc.backbone.num_frames          # 16 (native, fixed)
+        d["tubelet_size"] = enc.backbone.tubelet                # 2 -> T'=8 tokens
+        d["intensity_norm"] = "minmax"
+        d.pop("grayscale_stats", None)
+        ec["spec"] = "videomae_large"                           # feature cache/tag key
+        mode = "pooled [B,T',D]" if enc.backbone.pool_spatial else \
+            f"un-pooled grid [B,T',S'<= {enc.backbone.grid_cap}^2,D]"
+        print(f"[ph-eval] videomae {enc.backbone.name} D={enc.backbone.embed_dim} "
+              f"input={enc.backbone.input_size} 16f/tubelet{enc.backbone.tubelet} "
+              f"minmax->[0,1] -> 3-D tubelet, {mode}")
+        return enc
     if ec.get("type") == "image_baseline":
         # Frozen 2-D image encoder (CLIP/SigLIP/DINOv2/ViT-L/ResNet) applied
         # per-frame + tubelet-pooled to V-JEPA's temporal token grid (Plan Part C
@@ -343,6 +368,24 @@ def evaluate(pred, labels, meta, ref_seqs, num_classes, drop=(P.SIL_IDX,)):
     }
 
 
+def _cpu_state(model):
+    """Detached CPU copy of a model's params, for a best-epoch probe snapshot."""
+    return {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+
+
+def load_probe(path, device="cpu"):
+    """Reconstruct a trained TokenProbe from a probe checkpoint written by run().
+
+    Returns (probe.eval(), meta_dict). The frozen features it was trained on are
+    reproducible from meta['feature_tag'] (see extract's cache dir)."""
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    clf = TokenProbe(ck["dim"], ck["clf_classes"], kind=ck["probe_kind"],
+                     hidden=ck["hidden"], layers=ck["layers"],
+                     heads=ck["heads"], dropout=ck["dropout"])
+    clf.load_state_dict(ck["probe_state"])
+    return clf.to(device).eval(), ck
+
+
 def train_probe(cfg, ftr, ltr, fva, lva, mva, fte, lte, mte,
                 ref_va, ref_te, device, num_classes, drop=(P.SIL_IDX,)):
     pc = cfg["probe"]
@@ -357,7 +400,7 @@ def train_probe(cfg, ftr, ltr, fva, lva, mva, fte, lte, mte,
     loader = torch.utils.data.DataLoader(
         _FeatDS(ftr, ltr), batch_size=pc.get("batch_size", 32), shuffle=True,
         num_workers=cfg["data"].get("num_workers", 4), drop_last=False)
-    best = {"val_kappa": -1.0}
+    best = {"val_kappa": -1.0}; best_state = None; history = []
     for ep in range(epochs):
         lr = base * (ep + 1) / max(1, warmup) if ep < warmup else \
             0.5 * base * (1 + np.cos(np.pi * (ep - warmup) / max(1, epochs - warmup)))
@@ -369,16 +412,21 @@ def train_probe(cfg, ftr, ltr, fva, lva, mva, fte, lte, mte,
             opt.zero_grad()
             loss = lossf(clf(x).reshape(-1, num_classes), y.reshape(-1))
             loss.backward(); opt.step(); run += float(loss); nb += 1
+        tr_loss = run / max(1, nb)
         vm = evaluate(predict(clf, fva, device), lva, mva, ref_va, num_classes, drop)
+        history.append({"epoch": ep + 1, "lr": round(lr, 6),
+                        "train_loss": round(tr_loss, 4), "val_kappa": vm["kappa"],
+                        "val_per_micro": vm["per_micro"], "val_per_macro": vm["per_macro"]})
         if vm["kappa"] > best["val_kappa"]:
             tm = evaluate(predict(clf, fte, device), lte, mte, ref_te, num_classes, drop)
             best = {"epoch": ep + 1, "val_kappa": vm["kappa"], "val": vm, "test": tm,
-                    "train_loss": run / max(1, nb)}
+                    "train_loss": tr_loss}
+            best_state = _cpu_state(clf)            # snapshot best-val weights
         if ep % 5 == 0 or ep == epochs - 1:
-            print(f"[probe e{ep+1}/{epochs}] loss={run/max(1,nb):.3f} lr={lr:.2e} "
+            print(f"[probe e{ep+1}/{epochs}] loss={tr_loss:.3f} lr={lr:.2e} "
                   f"val κ={vm['kappa']:.3f} PERμ={vm['per_micro']:.3f} "
                   f"best_val_κ={best['val_kappa']:.3f}")
-    return best
+    return best, best_state, history
 
 
 # --------------------------------------------------------------------------- #
@@ -478,7 +526,7 @@ def train_probe_ctc(cfg, utt_tr, ref_tr, utt_va, ref_va, utt_te, ref_te,
         _UttDS(utt_tr, ref_tr), batch_size=bs, shuffle=True,
         num_workers=cfg["data"].get("num_workers", 2), collate_fn=_ctc_collate)
     epochs, warmup, base = pc.get("epochs", 40), pc.get("warmup", 4), pc.get("lr", 1e-3)
-    best = {"val_per": 2.0}
+    best = {"val_per": 2.0}; best_state = None; history = []
     for ep in range(epochs):
         lr = base * (ep + 1) / max(1, warmup) if ep < warmup else \
             0.5 * base * (1 + np.cos(np.pi * (ep - warmup) / max(1, epochs - warmup)))
@@ -491,15 +539,20 @@ def train_probe_ctc(cfg, utt_tr, ref_tr, utt_va, ref_va, utt_te, ref_te,
             loss = ctc(logp, targets, in_lens, tgt_lens)
             opt.zero_grad(); loss.backward(); opt.step()
             run += float(loss); nb += 1
+        tr_loss = run / max(1, nb)
         vm = _ctc_eval(clf, utt_va, ref_va, device, blank, drop, bs)
+        history.append({"epoch": ep + 1, "lr": round(lr, 6),
+                        "train_loss": round(tr_loss, 4),
+                        "val_per_micro": vm["per_micro"], "val_per_macro": vm["per_macro"]})
         if vm["per_micro"] < best["val_per"]:
             tm = _ctc_eval(clf, utt_te, ref_te, device, blank, drop, bs)
             best = {"epoch": ep + 1, "val_per": vm["per_micro"], "val": vm,
-                    "test": tm, "train_loss": run / max(1, nb)}
+                    "test": tm, "train_loss": tr_loss}
+            best_state = _cpu_state(clf)            # snapshot best-val weights
         if ep % 5 == 0 or ep == epochs - 1:
-            print(f"[probe-ctc e{ep+1}/{epochs}] loss={run/max(1,nb):.3f} lr={lr:.2e} "
+            print(f"[probe-ctc e{ep+1}/{epochs}] loss={tr_loss:.3f} lr={lr:.2e} "
                   f"val PERµ={vm['per_micro']:.3f} best_val_PERµ={best['val_per']:.3f}")
-    return best
+    return best, best_state, history
 
 
 # --------------------------------------------------------------------------- #
@@ -544,22 +597,47 @@ def run(cfg):
         utt_te = _assemble_utts(fte, lte, mte)
         print(f"[ph-eval] CTC mode: utts train/val/test = "
               f"{len(utt_tr)}/{len(utt_va)}/{len(utt_te)}; blank={num_classes}")
-        best = train_probe_ctc(cfg, utt_tr, ref_tr, utt_va, ref_va, utt_te, ref_te,
-                               device, num_classes, drop)
+        best, best_state, history = train_probe_ctc(
+            cfg, utt_tr, ref_tr, utt_va, ref_va, utt_te, ref_te,
+            device, num_classes, drop)
     else:
-        best = train_probe(cfg, ftr, ltr, fva, lva, mva, fte, lte, mte,
-                           ref_va, ref_te, device, num_classes, drop)
+        best, best_state, history = train_probe(
+            cfg, ftr, ltr, fva, lva, mva, fte, lte, mte,
+            ref_va, ref_te, device, num_classes, drop)
     out = {"encoder": cfg["encoder"].get("spec", "pretrained"),
            "kind": cfg["data"].get("kind", "usc_lss"),
            "probe": cfg["probe"].get("type", "tcn"), "loss": loss_kind,
-           "spatial_size": cfg["data"]["spatial_size"], "seed": seed, **best}
+           "spatial_size": cfg["data"]["spatial_size"], "seed": seed,
+           "history": history, **best}
     print("\n===== PHONEME RESULT =====")
     print(json.dumps(out, indent=2))
-    rp = os.path.join(meta["out"], f"phoneme_{cfg['data'].get('kind','usc_lss')}_"
-                      f"{_tag(cfg,'train')[0]}_{cfg['probe'].get('type','tcn')}_{loss_kind}"
-                      f"_s{seed}.json")
+    stem = os.path.join(meta["out"], f"phoneme_{cfg['data'].get('kind','usc_lss')}_"
+                        f"{_tag(cfg,'train')[0]}_{cfg['probe'].get('type','tcn')}_{loss_kind}"
+                        f"_s{seed}")
+    rp = stem + ".json"
     json.dump(out, open(rp, "w"), indent=2)
     print(f"[ph-eval] wrote {rp}")
+
+    # Save the best-val probe weights + everything needed to reload them, so the
+    # result is reproducible without retraining (frozen-feature cache is keyed by
+    # 'feature_tag'). Toggle off with meta.save_probe: false.
+    if best_state is not None and meta.get("save_probe", True):
+        pc = cfg["probe"]
+        wp = stem + ".pt"
+        torch.save({
+            "probe_state": best_state, "probe_kind": ptype, "loss": loss_kind,
+            "dim": int(ftr.shape[-1]),
+            "clf_classes": num_classes + (1 if loss_kind == "ctc" else 0),
+            "num_classes": num_classes,
+            "hidden": pc.get("hidden", 512), "layers": pc.get("layers", 2),
+            "heads": pc.get("heads", 8), "dropout": pc.get("dropout", 0.1),
+            "encoder_spec": cfg["encoder"].get("spec", "pretrained"),
+            "encoder_checkpoint": cfg["encoder"].get("checkpoint"),
+            "feature_tag": _tag(cfg, "train")[0], "seed": seed,
+            "best_epoch": best.get("epoch"), "manifest": cfg["data"].get("manifest"),
+            "spatial_size": cfg["data"]["spatial_size"], "metrics": out,
+        }, wp)
+        print(f"[ph-eval] wrote probe weights {wp}")
     return out
 
 
@@ -568,8 +646,9 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--encoder", default=None)
     ap.add_argument("--model", default=None,
-                    help="image-baseline encoder (clip|siglip|dinov2|vitl|resnet "
-                         "or a full timm name); sets encoder.type=image_baseline")
+                    help="baseline encoder: image (clip|siglip|dinov2|vitl|resnet or a "
+                         "full timm name) -> encoder.type=image_baseline; or 'videomae' "
+                         "(video 3-D, MCG-NJU/videomae-large) -> encoder.type=videomae")
     ap.add_argument("--tag", default=None)
     ap.add_argument("--batch", type=int, default=None, help="override data.batch_size")
     ap.add_argument("--probe", default=None,
@@ -580,13 +659,22 @@ def main():
     ap.add_argument("--seed", type=int, default=None,
                     help="override meta.seed (probe init/shuffle only; the frozen "
                          "feature cache is seed-independent, so multi-seed reuses it)")
+    ap.add_argument("--dtype", default=None, choices=["bfloat16", "float16", "float32"],
+                    help="override meta.dtype (use float16 on Pascal/V100 -- no bf16)")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.seed is not None:
         cfg["meta"]["seed"] = args.seed
+    if args.dtype is not None:
+        cfg["meta"]["dtype"] = args.dtype
     if args.model is not None:
-        cfg["encoder"]["type"] = "image_baseline"
-        cfg["encoder"]["model"] = args.model
+        if args.model.lower().startswith("videomae"):
+            cfg["encoder"]["type"] = "videomae"
+            cfg["encoder"]["model"] = ("MCG-NJU/videomae-large"
+                                       if args.model.lower() == "videomae" else args.model)
+        else:
+            cfg["encoder"]["type"] = "image_baseline"
+            cfg["encoder"]["model"] = args.model
     if args.encoder is not None:
         cfg["encoder"]["spec"] = args.encoder
     if args.tag is not None:

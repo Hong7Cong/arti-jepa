@@ -152,12 +152,18 @@ diagnostics/checkpoint cadence stay meaningful; bound wall-clock with `--max-ste
   26,875` optimizer-updates) into a **separate run folder** (`runs/tssl_vitl_256_combined`),
   so the **without-longitudinal baseline** — `tssl_vitl_256.yaml` (75-speaker pool,
   50 epochs, `runs/tssl_vitl_256`) and its existing checkpoint — is left intact for the
-  with/without-longitudinal ablation. Launch:
+  with/without-longitudinal ablation.
+  **OOM-safe settings (2026-06-25):** an earlier combined launch OOM'd in epoch 1
+  (before any checkpoint), so the micro-batch is now **`batch_size: 16`** (was 32):
+  `ipe: 1000` + grad-accum ×8 keeps `effective_batch: 128` and **`oue=125`/epoch**, so
+  the LR/EMA schedule and the `125×215` horizon are *unchanged* — only the GPU
+  activation peak (~24.5→~14-16 GB) and per-batch host buffers shrink. The launcher now
+  exports `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` by default. Launch from
+  scratch:
   ```bash
-  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    bash dev_artiJEPA/scripts/03_train_tssl.sh dev_artiJEPA/configs/tssl_vitl_256_combined.yaml
-  # ~1.7 h/epoch on a V100 (~12.5 s/micro-step) -> spans multiple allocations;
-  # resumes each epoch:  ... --resume runs/tssl_vitl_256_combined/latest.pt
+  bash dev_artiJEPA/scripts/03_train_tssl.sh dev_artiJEPA/configs/tssl_vitl_256_combined.yaml
+  # ~1.5-2 h/epoch on a V100 (bs16 -> 1000 micro-steps/epoch) -> spans multiple
+  # allocations; resumes each epoch:  ... --resume runs/tssl_vitl_256_combined/latest.pt
   ```
 - **fp16 vs bf16:** the V100 (Volta) has no bf16 tensor cores → T-SSL configs use
   `dtype: float16` + GradScaler; on the L40S/Ampere+ switch to `bfloat16` (the

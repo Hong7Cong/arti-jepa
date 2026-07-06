@@ -85,7 +85,9 @@ encoder.**
 | 2026-06-16 | tssl_256 **@e50** (final) | gold/OOD usc_lss | 256 | tcn | 0.382 | 0.639 | 0.416 | 0.407 | 0.024 |
 | 2026-06-16 | tssl_256 **@e50** (final) | gold/OOD usc_lss | 256 | tcn_spatial | 0.488 | 0.527 | 0.508 | 0.508 | 0.024 |
 | 2026-06-16 | **tssl_256 @e50 (final)** (V-JEPA) | gold/OOD usc_lss | 256 | **attentive** | **0.530** | **0.486** | 0.539 | 0.549 | 0.024 |
-| _pending_ | combined (+longitudinal) 256 | gold/OOD usc_lss | 256 | attentive | **TBA** | TBA | TBA | TBA | 0.024 |
+| 2026-07-05 | **combined ckpt_100 (+longitudinal)** 256 | gold/OOD usc_lss | 256 | attentive | **0.556±.003** | 0.469 | 0.571 | 0.574 | 0.024 |
+| 2026-07-05 | combined ckpt_100 (+longitudinal) 256 | gold/OOD usc_lss | 256 | tcn_spatial | 0.551±.003 | 0.433 | 0.565 | 0.569 | 0.024 |
+| 2026-07-05 | base: VideoMAE-L (video SSL) | gold/OOD usc_lss | 224/16f | attentive | 0.477±.012 | 0.528 | 0.504 | 0.498 | 0.024 |
 | _pending_ | pretrained | pseudo/75-spk | 128 | tcn | **TBA** | TBA | TBA | TBA | |
 
 ---
@@ -219,6 +221,13 @@ log table.
 > *same* 128px — the gap was the mean-pool probe discarding spatial structure.
 
 ---
+
+## VideoMAE video baseline — phoneme (usc_lss) DONE 2026-07-05
+The generic **video-SSL** baseline (`artijepa/videomae_baseline.py`,
+`MCG-NJU/videomae-large`, frozen, attentive, 3 seeds) on the gold/OOD phoneme task:
+**test κ 0.477 ± 0.012** — above frozen pretrained V-JEPA2 (0.449) but below T-SSL
+(0.538) and +longitudinal (0.556). Full table + repro caveats (transformers/torch
+dtype shim + `q_bias`/`v_bias` restore) in **`RESULTS_usclss.md`**.
 
 ## Task 8 — stuttering disfluency-type classification (infra 2026-06-30, results TBA)
 Segment-level disfluency-type classification from frozen (or fine-tuned) rtMRI
