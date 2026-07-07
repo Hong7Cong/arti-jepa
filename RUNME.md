@@ -140,7 +140,40 @@ Compare vs `tssl256` (0.527) and `pretrained256` (0.449) → fills the TBA row.
 
 ---
 
-## 6. Task-1 pseudo labels — TBA (env-blocked)
+## 6. Phoneme-structure visualization — t-SNE / UMAP (`artijepa/tsne_phonemes.py`)
+
+Visualize whether the frozen per-token features separate by phoneme, colored by
+**phonetic class** (Vowel/Diphthong/Plosive/Fricative/Affricate/Nasal/Approximant;
+`sil` and padded tokens dropped). Reuses the **attentive** feature caches + saved
+probes from §2/§4 — no re-extraction. Two representations, **both** rendered:
+- **B (raw-pooled)** — `feats.mean(S')`, the encoder's OWN per-token vector, NO
+  trained probe → intrinsic encoder geometry (the non-circular panel: tighter
+  clusters for T-SSL vs a baseline visually corroborates the κ ranking).
+- **A (trained-q)** — the AttentivePooler output (penultimate vector the linear
+  classifier reads), reconstructed from the probe `.pt`; the probe's decision space.
+
+CPU-only (no GPU needed). The probe `.pt`'s `feature_tag` locates the cache, so it
+is robust to stale hashes. UMAP is optional (`pip install umap-learn`; skipped with
+a note if absent).
+
+```bash
+# one encoder, both reps × {t-SNE, UMAP} -> eval/tsne/tsne_<enc>_s0.png
+python -m artijepa.tsne_phonemes --encoder tssl256comb100
+
+# cross-encoder comparison panel (cols = encoders; one PNG per rep × method):
+python -m artijepa.tsne_phonemes \
+      --encoder tssl256comb100,pretrained256,videomae,base_resnet
+# -> eval/tsne/compare_rep{A,B}_{tsne,umap}_s0.png  (+ per-encoder PNGs)
+```
+Encoder keys = the eval tags (`tssl256comb100`, `tssl256`, `pretrained256`,
+`videomae`, `base_{vitl,dinov2,siglip,clip,resnet}`). Flags: `--rep {both,A,B}`,
+`--method {both,tsne,umap}`, `--cap N` (max tokens/phoneme, default 200),
+`--seed`, `--perplexity`. Requires the attentive probe `.pt` + its `sp_` cache to
+exist (run §2/§4 first). Outputs → `/scratch1/hongn/artijepa/eval/tsne/`.
+
+---
+
+## 7. Task-1 pseudo labels — TBA (env-blocked)
 
 Decoupled (audio model needs `transformers<5` or torch≥2.7):
 ```bash
