@@ -60,7 +60,9 @@ data:
                           #   6 + 2 = 8 cores max (lower num_workers to shrink)
 
 probe:
-  type: attentive         # {attentive (canonical), attentive_lstm, mean, mlp}
+  # {attentive (canonical), pooled_attentive (mean spatial -> attend time; tiny cache),
+  #  attentive_lstm, mean, mlp}
+  type: attentive
   epochs: 40
   warmup: 4
   lr: 1.0e-3

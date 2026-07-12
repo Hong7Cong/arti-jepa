@@ -56,7 +56,7 @@ from artijepa.checkpoint import filtered_load
 from artijepa.model import build_models
 # Reuse the exact probe / training machinery from the disfluency-type eval so the
 # two evals stay byte-identical where they overlap (probe, class weights, folds).
-from artijepa.eval_disfluency import train_probe, _val_split
+from artijepa.eval_disfluency import train_probe, _val_split, pool_mode_for_probe
 
 BINARY_CLASSES = ["fluent", "disfluent"]
 
@@ -135,13 +135,16 @@ def build_rows(cfg):
 def _tag(cfg):
     """A content hash so different geometries / row-builds get distinct caches."""
     d, ec = cfg["data"], cfg["encoder"]
+    pm = d.get("pool_mode", "none")
     hd = {"ckpt": ec["checkpoint"], "key": ec.get("key", "target_encoder"),
           "sz": d["spatial_size"], "fpc": d["frames_per_clip"],
           "tub": d.get("tubelet_size", 2), "pad": d.get("event_pad_s", 0.0),
-          "pool_spatial": d.get("pool_spatial", False),
+          "pool_spatial": pm == "all",     # kept for hash-compat with earlier caches
           "neg_per_pos": d.get("neg_per_pos", 1.0), "build_seed": d.get("build_seed", 0),
           "tiers": d.get("tiers", ["disfluency"]), "min_dur": d.get("min_dur", 0.20),
           "max_dur": d.get("max_dur", 8.0), "merge_gap": d.get("merge_gap", 0.25)}
+    if pm == "spatial":                    # new mode -> distinct cache; leaves none/all hashes intact
+        hd["pool_mode"] = "spatial"
     h = hashlib.sha1(json.dumps(hd, sort_keys=True).encode()).hexdigest()[:10]
     tag = cfg["meta"].get("tag") or os.path.basename(os.path.dirname(ec["checkpoint"]))
     return f"{tag}_{h}"
@@ -181,7 +184,7 @@ def extract(encoder, cfg, rows, device, dtype):
 
     tub = d.get("tubelet_size", 2)
     Tp = d["frames_per_clip"] // tub
-    pool_spatial = d.get("pool_spatial", False)
+    pool_mode = d.get("pool_mode", "none")
     feats = None; labels = []; spks = []; pos = 0; t0 = time.time(); N = len(ds)
     for bi, (clips, y, meta) in enumerate(loader):
         clips = clips.to(device, non_blocking=True)
@@ -190,7 +193,12 @@ def extract(encoder, cfg, rows, device, dtype):
             tok = encoder.backbone(clips)                    # [B, T'*S', D]
         B, Ntot, D = tok.shape
         tok = tok.float().reshape(B, Tp, Ntot // Tp, D)      # [B,T',S',D]
-        v = tok.mean((1, 2)) if pool_spatial else tok.reshape(B, -1, D)
+        if pool_mode == "all":
+            v = tok.mean((1, 2))                             # [B, D]        (mean/mlp)
+        elif pool_mode == "spatial":
+            v = tok.mean(2)                                  # [B, T', D]    (pooled_attentive)
+        else:
+            v = tok.reshape(B, -1, D)                        # [B, T'*S', D] (attentive[_lstm])
         v = v.cpu().numpy().astype(np.float16)
         if feats is None:
             feats = np.lib.format.open_memmap(fp, mode="w+", dtype=np.float16,
@@ -218,13 +226,14 @@ def run(cfg):
     dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}.get(
         meta.get("dtype", "bfloat16").lower(), torch.float32)
     classes = BINARY_CLASSES
-    # attentive probe pools the raw token grid; mean/mlp use the pre-pooled vector.
-    # mean/mlp consume a pre-pooled [D] vector; attentive & attentive_lstm keep the
-    # token grid (attentive_lstm pools the S' spatial tokens itself, per frame).
-    cfg["data"]["pool_spatial"] = cfg["probe"].get("type", "attentive") in ("mean", "mlp")
-    print(f"[bin-eval] frozen binary | classes={classes} "
-          f"probe={cfg['probe'].get('type','attentive')} "
-          f"pool_spatial={cfg['data']['pool_spatial']} device={device}")
+    # How the [T',S',D] grid is reduced at extraction (drives the cache shape):
+    #   none    -> [T'*S', D]  attentive / attentive_lstm
+    #   spatial -> [T', D]      pooled_attentive (mean spatial -> attend time; tiny cache)
+    #   all     -> [D]          mean / mlp
+    ptype = cfg["probe"].get("type", "attentive")
+    cfg["data"]["pool_mode"] = pool_mode_for_probe(ptype)
+    print(f"[bin-eval] frozen binary | classes={classes} probe={ptype} "
+          f"pool_mode={cfg['data']['pool_mode']} device={device}")
 
     gs = cfg["data"].get("grayscale_stats")
     if gs and os.path.exists(gs):
@@ -331,7 +340,7 @@ def main():
     ap.add_argument("--checkpoint", default=None, help="T-SSL/V-JEPA checkpoint (.pt)")
     ap.add_argument("--key", default=None, help="state-dict key (default target_encoder)")
     ap.add_argument("--probe", default=None,
-                    choices=["attentive", "attentive_lstm", "mean", "mlp"])
+                    choices=["attentive", "pooled_attentive", "attentive_lstm", "mean", "mlp"])
     ap.add_argument("--lstm-hidden", type=int, default=None, help="attentive_lstm hidden size")
     ap.add_argument("--lstm-layers", type=int, default=None)
     ap.add_argument("--lstm-chunk", type=int, default=None,

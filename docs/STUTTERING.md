@@ -366,14 +366,24 @@ bash scripts/20_eval_stutter_binary.sh --probe mean    # cheaper linear-on-mean 
 bash scripts/20_eval_stutter_binary.sh --split fixed --test-speaker PWS10 --val-speaker PWS7
 ```
 
-### Probe types — flat `attentive` vs `attentive_lstm`
+### Probe types — `attentive` · `pooled_attentive` · `attentive_lstm`
 
-The head pools the frozen encoder's `[T'·S', D]` token grid to one label. Two probes
-keep the full grid (config `probe.type`):
+The head pools the frozen encoder's `[T'·S', D]` token grid to one label. The probe
+type also chooses **how the grid is reduced at extraction** (`pool_mode`, which sets
+the cache shape) — see `pool_mode_for_probe`:
 
-- **`attentive`** — one V-JEPA `AttentivePooler` (1 query) over **all** T'·S' tokens
-  → linear. Simple, but its cost grows with the *joint* spatiotemporal token count.
-- **`attentive_lstm`** — *factorized* spatiotemporal pooling that matches the signal's
+- **`attentive`** (`pool_mode=none`, cache `[N, T'·S', D]`) — one V-JEPA
+  `AttentivePooler` (1 query) over **all** T'·S' tokens → linear. Simple, but its cost
+  and its 31 GiB (32f) / 190 GiB (200f) cache grow with the *joint* token count.
+- **`pooled_attentive`** (`pool_mode=spatial`, cache `[N, T', D]`) — **mean-pool the S'
+  spatial tokens of each frame at extraction**, then an `AttentivePooler` over the
+  resulting **temporal** sequence → linear. Same head as `attentive`, but over T'
+  (16–100) tokens instead of T'·S' (~4k–25k). The cache is **S'× (256×) smaller** —
+  32f → **123 MB** (measured), 200f → ~0.8 GiB — so it fits GPU/RAM trivially with no
+  page-cache thrash, and probe VRAM is ~0.2 GiB. Cost: within-frame spatial structure
+  is averaged away before the head (temporal attention is kept). **This is the
+  recommended path for 200f** (§9.6).
+- **`attentive_lstm`** (`pool_mode=none`) — *factorized* spatiotemporal pooling that matches the signal's
   structure: an `AttentivePooler` over the **S' spatial tokens of each frame**
   (one shared pooler, applied per temporal step) → a `[T', D]` per-frame sequence →
   **LSTM over time** (bi-dir by default) → linear. Spatial attention is confined to
@@ -382,10 +392,22 @@ keep the full grid (config `probe.type`):
   with optional **gradient checkpointing** (`probe.checkpoint`), so peak activation
   memory is O(chunk·S') instead of O(T'·S').
 
-Both reuse the same feature cache (`pool_spatial=False`), so switching probe costs no
-re-extraction:
+`attentive` and `attentive_lstm` share the full-grid cache (no re-extraction between
+them); `pooled_attentive` and `mean`/`mlp` each have their own (smaller) cache.
+
+**Measured LOSO (frozen tssl-256, 32f, seed 0):**
+
+| probe | cache (32f) | probe VRAM | pooled macro-F1 | mean macro-F1 |
+|---|---|---|---|---|
+| attentive        | 31 GiB  | ~7 GiB (B64)   | **0.828** | 0.816 |
+| pooled_attentive | **123 MB** | **~0.2 GiB** | 0.811 | 0.808 |
+| attentive_lstm   | 31 GiB  | ~7 GiB (B64)   | 0.813 | 0.816 |
+
+`pooled_attentive` costs ~1.5 macro-F1 points vs the full grid but shrinks the cache
+**256×** and probe VRAM ~35× — the practical choice when the full grid won't fit (200f).
 
 ```bash
+bash scripts/20_eval_stutter_binary.sh --probe pooled_attentive     # tiny cache, temporal attn
 bash scripts/20_eval_stutter_binary.sh --probe attentive_lstm
 # high frame counts — bound VRAM with chunking + checkpointing:
 bash scripts/20_eval_stutter_binary.sh --frames 200 --probe attentive_lstm \
@@ -475,16 +497,19 @@ changing it.
 
 6. **200f feasibility (measured).** GPU is **not** the limit (extraction ~3 GiB;
    probe 5–22 GiB by batch/chunk — fits one card). The limit is the **feature cache =
-   ~190 GiB** at 200f: extraction RSS climbs toward that (reclaimable mmap-write
-   pages), and probe training wants ~190 GiB in **page cache** to avoid random-read
-   thrash. Fits this 251 GB box only barely (and it's shared). To make 200f comfortable,
-   shrink the cache — mean-pool spatial at extraction → `[N,T′,D]` = ~0.7 GiB (trades
-   learnable attentive-spatial for fixed mean), or chunk-encode 32f windows.
+   ~190 GiB** at 200f (full-grid probes): extraction RSS climbs toward that (reclaimable
+   mmap-write pages), and probe training wants ~190 GiB in **page cache** to avoid
+   random-read thrash. Fits this 251 GB box only barely (and it's shared). **The fix is
+   `pooled_attentive`** (`pool_mode=spatial`): mean-pool spatial at extraction →
+   `[N,T′,D]` cache = 123 MB (32f, measured) / ~0.8 GiB (200f), which sidesteps the
+   whole RAM problem; alternatively chunk-encode 32f windows.
 
 7. **Results (frozen tssl-256, LOSO, seed 0, 32f).** attentive **0.828** pooled /
-   0.816 mean macro-F1; attentive_lstm 0.813 / 0.816 — a **tie** at 32f (as expected;
-   attentive_lstm is about VRAM scaling at high frames, not 32f accuracy). Curves +
-   history via `plot_stutter_binary.py` (GPU-preloads the cache for speed).
+   0.816 mean macro-F1; attentive_lstm 0.813 / 0.816 — a **tie** (attentive_lstm is
+   about VRAM scaling at high frames, not 32f accuracy); **pooled_attentive 0.811 /
+   0.808** — ~1.5 pts below the full grid but at a **256× smaller cache** (123 MB) and
+   ~0.2 GiB probe VRAM, so it's the go-to when the grid won't fit. Curves + history via
+   `plot_stutter_binary.py` (GPU-preloads the cache for speed).
 
 _Regenerate these statistics with the analysis over `artijepa/stutter.py`'s
 `parse_textgrid` / `canonicalize` on `/data1/span_data/stuttering/`._

@@ -260,13 +260,17 @@ duration-matched fluent negatives, so clip length is not a give-away. Frozen T-S
 | encoder | mode | task | probe | res | macro-F1 (pooled) | bal-acc | acc |
 |---|---|---|---|---|---|---|---|
 | T-SSL 256 (`tssl256`) | frozen | binary | attentive | 256 | **0.828** | 0.827 | 0.829 |
+| T-SSL 256 (`tssl256`) | frozen | binary | pooled_attentive | 256 | 0.811 | 0.810 | 0.810 |
 | T-SSL 256 (`tssl256`) | frozen | binary | attentive_lstm | 256 | 0.813 | — | 0.818 |
 
-`attentive_lstm` (attn-pool S′ spatial tokens/frame → bi-LSTM over T′; docs
-STUTTERING.md §8) ties the flat attentive head at 32f (mean-macro-F1 0.816 vs 0.816);
-its purpose is bounding VRAM at high frame counts via chunked+checkpointed spatial
-pooling, not accuracy at 32f. Per-fold: PWS7 0.925 · PWS6 0.898 · PWS10 0.868 ·
-PWS5 0.866 · PWS3 0.783 · PWS4 0.738 · PWS8 0.634.
+`attentive_lstm` (attn-pool S′ spatial tokens/frame → bi-LSTM over T′) and
+`pooled_attentive` (mean-pool spatial → AttentivePooler over T′; docs STUTTERING.md §8)
+both essentially tie the flat attentive head at 32f. Their purpose is cost, not 32f
+accuracy: attentive_lstm bounds VRAM via chunked+checkpointed spatial pooling;
+**pooled_attentive shrinks the feature cache 256× (31 GiB → 123 MB)** and probe VRAM
+to ~0.2 GiB — the go-to for 200f where the full grid (190 GiB cache) won't fit.
+attentive_lstm per-fold: PWS7 0.925 · PWS6 0.898 · PWS10 0.868 · PWS5 0.866 ·
+PWS3 0.783 · PWS4 0.738 · PWS8 0.634.
 
 Per-class (pooled, attentive): fluent P/R/F1 0.83/0.80/0.81, disfluent 0.83/0.85/0.84.
 Mean-over-folds macro-F1 = 0.816; per-speaker spread 0.66–0.94 (best PWS7, worst

@@ -189,7 +189,8 @@ def main():
     cfg = load_config(args.config)
     if args.seed is not None:
         cfg["meta"]["seed"] = args.seed
-    cfg["data"]["pool_spatial"] = cfg["probe"].get("type", "attentive") in ("mean", "mlp")
+    from artijepa.eval_disfluency import pool_mode_for_probe
+    cfg["data"]["pool_mode"] = pool_mode_for_probe(cfg["probe"].get("type", "attentive"))
 
     seed = cfg["meta"].get("seed", 0); rng = np.random.default_rng(seed)
     np.random.seed(seed); torch.manual_seed(seed)
