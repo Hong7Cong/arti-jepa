@@ -206,13 +206,23 @@ def extract(encoder, cfg, device, dtype):
 class SegmentProbe(nn.Module):
     """Pool a segment's tokens -> disfluency class logits.
 
-      attentive -- V-JEPA AttentivePooler over the [T'*S',D] token set -> linear.
-      mean      -- LayerNorm+linear on the pre-pooled [D] vector.
-      mlp       -- 2-layer MLP on the pre-pooled [D] vector.
+      attentive      -- V-JEPA AttentivePooler over the whole [T'*S',D] token set -> linear.
+      attentive_lstm -- AttentivePooler over the S' SPATIAL tokens *per frame*
+                        (factorized: one shared pooler applied to each of the T'
+                        temporal steps) -> a [T',D] sequence -> LSTM over time ->
+                        linear. This decouples the quadratic spatial attention
+                        (now over S'=256, not T'*S') from the temporal model (an
+                        O(T') LSTM, not O((T'*S')^2)), and the per-frame spatial
+                        pool is run in temporal *chunks* with optional gradient
+                        checkpointing so peak activation memory is O(chunk*S')
+                        instead of O(T'*S') -- the VRAM win at large T'.
+      mean           -- LayerNorm+linear on the pre-pooled [D] vector.
+      mlp            -- 2-layer MLP on the pre-pooled [D] vector.
     """
 
     def __init__(self, dim, num_classes, kind="attentive", hidden=512, heads=8,
-                 dropout=0.1):
+                 dropout=0.1, t_steps=None, lstm_hidden=256, lstm_layers=1,
+                 bidirectional=True, temporal_pool="mean", chunk=0, checkpoint=False):
         super().__init__()
         self.kind = kind
         self.drop = nn.Dropout(dropout)
@@ -221,6 +231,20 @@ class SegmentProbe(nn.Module):
             self.pooler = AttentivePooler(num_queries=1, embed_dim=dim,
                                           num_heads=heads, mlp_ratio=4.0, depth=1)
             self.head = nn.Linear(dim, num_classes)
+        elif kind == "attentive_lstm":
+            from src.models.attentive_pooler import AttentivePooler
+            assert t_steps, "attentive_lstm needs t_steps (# temporal tokens T')"
+            self.t_steps = int(t_steps)
+            self.chunk = int(chunk) or self.t_steps    # temporal chunk for the spatial pool
+            self.use_ckpt = bool(checkpoint)
+            self.temporal_pool = temporal_pool
+            self.spatial_pool = AttentivePooler(num_queries=1, embed_dim=dim,
+                                                num_heads=heads, mlp_ratio=4.0, depth=1)
+            self.lstm = nn.LSTM(dim, lstm_hidden, num_layers=lstm_layers,
+                                batch_first=True, bidirectional=bidirectional,
+                                dropout=dropout if lstm_layers > 1 else 0.0)
+            out_dim = lstm_hidden * (2 if bidirectional else 1)
+            self.head = nn.Linear(out_dim, num_classes)
         elif kind == "mean":
             self.net = nn.Sequential(nn.LayerNorm(dim), nn.Linear(dim, num_classes))
         elif kind == "mlp":
@@ -230,10 +254,37 @@ class SegmentProbe(nn.Module):
         else:
             raise ValueError(kind)
 
+    def _spatial_pool_chunked(self, x):
+        """[B,T',S',D] -> [B,T',D]: attentive-pool the S' spatial tokens per frame.
+
+        Frames are pooled independently, so we sweep the T' axis in ``chunk``-sized
+        blocks; under training we optionally gradient-checkpoint each block so its
+        activations are recomputed in backward (peak ~ O(B*chunk*S') not O(B*T'*S')).
+        """
+        B, T, S, D = x.shape
+        outs = []
+        for c0 in range(0, T, self.chunk):
+            xc = x[:, c0:c0 + self.chunk].reshape(-1, S, D)      # [B*tc, S', D]
+            if self.use_ckpt and self.training:
+                from torch.utils.checkpoint import checkpoint
+                q = checkpoint(lambda t: self.spatial_pool(t).squeeze(1), xc,
+                               use_reentrant=False)
+            else:
+                q = self.spatial_pool(xc).squeeze(1)             # [B*tc, D]
+            outs.append(q.reshape(B, -1, D))
+        return torch.cat(outs, dim=1)                            # [B, T', D]
+
     def forward(self, x):
         if self.kind == "attentive":                         # x: [B, L, D]
             q = self.pooler(x).squeeze(1)                    # [B, D]
             return self.head(self.drop(q))
+        if self.kind == "attentive_lstm":                    # x: [B, T'*S', D]
+            B, L, D = x.shape
+            T = self.t_steps; S = L // T
+            seq = self._spatial_pool_chunked(x.reshape(B, T, S, D))   # [B, T', D]
+            out, _ = self.lstm(self.drop(seq))               # [B, T', H*dir]
+            z = out.mean(1) if self.temporal_pool == "mean" else out[:, -1]
+            return self.head(self.drop(z))
         return self.net(self.drop(x))                        # x: [B, D]
 
 
@@ -273,9 +324,16 @@ def train_probe(cfg, feats, y, tr, va, te, spk_te, device, classes):
     Returns (test_metrics_dict, test_pred, best_val_f1)."""
     pc = cfg["probe"]; num_classes = len(classes)
     dim = feats.shape[-1]
+    t_steps = cfg["data"]["frames_per_clip"] // cfg["data"].get("tubelet_size", 2)
     clf = SegmentProbe(dim, num_classes, kind=pc.get("type", "attentive"),
                        hidden=pc.get("hidden", 512), heads=pc.get("heads", 8),
-                       dropout=pc.get("dropout", 0.1)).to(device)
+                       dropout=pc.get("dropout", 0.1), t_steps=t_steps,
+                       lstm_hidden=pc.get("lstm_hidden", 256),
+                       lstm_layers=pc.get("lstm_layers", 1),
+                       bidirectional=pc.get("bidirectional", True),
+                       temporal_pool=pc.get("temporal_pool", "mean"),
+                       chunk=pc.get("chunk", 0),
+                       checkpoint=pc.get("checkpoint", False)).to(device)
     opt = torch.optim.AdamW(clf.parameters(), lr=pc.get("lr", 1e-3),
                             weight_decay=pc.get("wd", 0.01))
     w = _class_weights(y[tr], num_classes, device) if pc.get("class_weight") == "balanced" else None
@@ -333,7 +391,9 @@ def run_frozen(cfg):
         meta.get("dtype", "bfloat16").lower(), torch.float32)
     task = cfg["data"].get("task", "type5")
     classes, _ = S.label_space(task)
-    cfg["data"]["pool_spatial"] = cfg["probe"].get("type", "attentive") != "attentive"
+    # mean/mlp probes consume a pre-pooled [D] vector; attentive & attentive_lstm
+    # both need the token grid kept (the latter pools spatial itself, per frame).
+    cfg["data"]["pool_spatial"] = cfg["probe"].get("type", "attentive") in ("mean", "mlp")
     print(f"[dis-eval] frozen | task={task} classes={classes} probe={cfg['probe'].get('type','attentive')} "
           f"pool_spatial={cfg['data']['pool_spatial']} device={device}")
 
@@ -557,7 +617,8 @@ def main():
                     help="videomae | an image-baseline (clip|siglip|dinov2|vitl|resnet)")
     ap.add_argument("--mode", default=None, choices=["frozen", "finetune"])
     ap.add_argument("--task", default=None, choices=["type5", "type3", "binary"])
-    ap.add_argument("--probe", default=None, choices=["attentive", "mean", "mlp"])
+    ap.add_argument("--probe", default=None,
+                    choices=["attentive", "attentive_lstm", "mean", "mlp"])
     ap.add_argument("--tag", default=None)
     ap.add_argument("--split", default=None, choices=["loso", "fixed", "random"])
     ap.add_argument("--test-speaker", default=None)

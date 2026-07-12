@@ -246,9 +246,32 @@ tiny real-data frozen + finetune smoke on VideoMAE-base). Runs below are **TBA**
 | VideoMAE-L/16 | fine-tune | type5 | attentive | 224 | **TBA** | TBA |
 | image baselines (vitl/…) | frozen | type5 | attentive | native | **TBA** | TBA |
 
-Also TBA: `type3` (block/rep/pro only) and the `binary` fluent-vs-disfluent
-baseline; the `disfluency2` (rep-heavy) tier as a secondary report. JSONs will
-persist to `eval/disfluency_*_s{seed}.json`.
+Also TBA: `type3` (block/rep/pro only); the `disfluency2` (rep-heavy) tier as a
+secondary report. Type JSONs will persist to `eval/disfluency_*_s{seed}.json`.
+
+### Task 8b — binary fluent-vs-disfluent — T-SSL 256 **DONE (2026-07-11)**
+Separate pipeline (`eval_stutter_binary.py`, docs/STUTTERING.md §8): OpenCV loader
+(the decord-based `eval_disfluency` reads these pal8 `.avi` as black frames) + §7
+duration-matched fluent negatives, so clip length is not a give-away. Frozen T-SSL
+256 combined `ckpt_100`, loaded as in `demo.ipynb`, fed at the checkpoint geometry
+(**256px / 32f → 4096 tok**), attentive probe, **LOSO** over the 7 PWS. 3,901 clips
+(2,070 disfluent / 1,831 fluent). Cache + JSON on `/data1/hongn/arti-jepa/`.
+
+| encoder | mode | task | probe | res | macro-F1 (pooled) | bal-acc | acc |
+|---|---|---|---|---|---|---|---|
+| T-SSL 256 (`tssl256`) | frozen | binary | attentive | 256 | **0.828** | 0.827 | 0.829 |
+| T-SSL 256 (`tssl256`) | frozen | binary | attentive_lstm | 256 | 0.813 | — | 0.818 |
+
+`attentive_lstm` (attn-pool S′ spatial tokens/frame → bi-LSTM over T′; docs
+STUTTERING.md §8) ties the flat attentive head at 32f (mean-macro-F1 0.816 vs 0.816);
+its purpose is bounding VRAM at high frame counts via chunked+checkpointed spatial
+pooling, not accuracy at 32f. Per-fold: PWS7 0.925 · PWS6 0.898 · PWS10 0.868 ·
+PWS5 0.866 · PWS3 0.783 · PWS4 0.738 · PWS8 0.634.
+
+Per-class (pooled, attentive): fluent P/R/F1 0.83/0.80/0.81, disfluent 0.83/0.85/0.84.
+Mean-over-folds macro-F1 = 0.816; per-speaker spread 0.66–0.94 (best PWS7, worst
+PWS8/PWS4) — held-out-speaker domain shift (val macro-F1 ≈ 0.90 every fold).
+JSON: `eval/stutter_binary/stutter_binary_tssl256_8d8055227e_attentive_loso_s0.json`.
 
 ---
 

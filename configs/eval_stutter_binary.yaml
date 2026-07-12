@@ -1,0 +1,79 @@
+# Stuttering BINARY fluent-vs-disfluent classification (Arti-JEPA Task 8b).
+# Frozen 256px T-SSL V-JEPA2 encoder -> attentive probe, leave-one-speaker-out.
+#
+# Uses the OpenCV-safe `stutter_binary` dataloader (docs/STUTTERING.md §7): positives
+# are disfluency events, negatives are duration-matched fluent-speech windows. NOTE:
+# do NOT reuse eval_disfluency.py for this corpus -- its decord decoder reads these
+# pal8 .avi as all-black frames (see the doc's "Decoder bug" warning).
+#
+# Encoder is loaded exactly like examples/demo.ipynb: build ViT-L at 256px/32f/
+# tubelet2/patch16, load the EMA `target_encoder` weights.
+#
+#   python -m artijepa.eval_stutter_binary --config configs/eval_stutter_binary.yaml
+#   ... --probe mean            # cheaper linear-on-mean-pool probe
+#   ... --split fixed --test-speaker PWS10 --val-speaker PWS7
+# NOTE: all persistent artifacts (feature cache + result JSON) live on /data1
+# (the /data2/hongn/artijepa tree was moved here 2026-07-11). The 256px combined
+# checkpoint was trained with grayscale_stats_combined.json; that file was NOT
+# preserved in the move, so global channel-norm falls back to mean=0/std=1 -- which
+# compute_stats.py documents these values land near anyway (they are computed on
+# already per-clip z-scored clips). Restore the json at the path below to override.
+meta:
+  out: /data1/hongn/arti-jepa/eval/stutter_binary
+  cache_dir: /data1/hongn/arti-jepa/feat_cache/stutter_binary
+  seed: 0
+  dtype: float16
+  tag: tssl256
+
+encoder:
+  checkpoint: /data1/hongn/arti-jepa/tssl_vitl_256_combined/ckpt_100.pt
+  key: target_encoder     # EMA target-encoder weights (keys already backbone.*)
+  model_name: vit_large
+
+data:
+  root: /data1/span_data/stuttering
+  tiers: [disfluency]     # positive events come from the primary disfluency tier
+  # ---- binary-row builder (stutter_binary.build_rows) ----
+  neg_per_pos: 1.0        # ~1:1 fluent negatives, duration-matched to positives
+  build_seed: 0           # seed for the negative-window sampling (fixes the manifest)
+  min_dur: 0.20
+  max_dur: 8.0
+  merge_gap: 0.25
+  # ---- splits ----
+  split_mode: loso        # {loso: leave-one-speaker-out, fixed, random}
+  test_speaker: PWS10     # used by split_mode: fixed
+  val_speaker: null
+  val_frac: 0.15          # stratified val carved from train (loso/random)
+  # ---- clip geometry (match the checkpoint: 256px / 32f / tubelet 2) ----
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32     # 32 uniformly-sampled native-fps frames -> 16 temporal tokens
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  grayscale_stats: /data1/hongn/arti-jepa/grayscale_stats_combined.json  # -> (0,1) fallback if absent
+  event_pad_s: 0.0        # clip = the event / matched-fluent window exactly
+  batch_size: 8
+  # ---- CPU budget: total cores ~= num_workers (1 core each) + cpu_threads ----
+  num_workers: 6          # video-decode workers, pinned to 1 thread each
+  cpu_threads: 2          # main-process torch/OpenCV intra-op threads
+                          #   6 + 2 = 8 cores max (lower num_workers to shrink)
+
+probe:
+  type: attentive         # {attentive (canonical), attentive_lstm, mean, mlp}
+  epochs: 40
+  warmup: 4
+  lr: 1.0e-3
+  wd: 0.01
+  hidden: 512
+  heads: 8
+  dropout: 0.1
+  batch_size: 64
+  class_weight: balanced  # inverse-frequency CE (fluent/disfluent are near-balanced but not exactly)
+  # ---- attentive_lstm only: attn-pool S' spatial tokens/frame -> LSTM over T' ----
+  lstm_hidden: 256
+  lstm_layers: 1
+  bidirectional: true
+  temporal_pool: mean     # {mean over LSTM outputs, last timestep}
+  chunk: 0                # temporal chunk for the per-frame spatial pool (0 = all T')
+  checkpoint: false       # gradient-checkpoint the chunked spatial pool (set true @ high frames)
