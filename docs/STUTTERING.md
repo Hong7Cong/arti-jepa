@@ -382,7 +382,7 @@ the cache shape) — see `pool_mode_for_probe`:
   32f → **123 MB** (measured), 200f → ~0.8 GiB — so it fits GPU/RAM trivially with no
   page-cache thrash, and probe VRAM is ~0.2 GiB. Cost: within-frame spatial structure
   is averaged away before the head (temporal attention is kept). **This is the
-  recommended path for 200f** (§9.6).
+  recommended path for 200f** (§10.6).
 - **`attentive_lstm`** (`pool_mode=none`) — *factorized* spatiotemporal pooling that matches the signal's
   structure: an `AttentivePooler` over the **S' spatial tokens of each frame**
   (one shared pooler, applied per temporal step) → a `[T', D]` per-frame sequence →
@@ -467,7 +467,58 @@ faithful fp16 re-run: mean best test macro-F1 = 0.815, matching the 0.816 above.
 
 ---
 
-## 9. Critical changes & decision log (binary task, 2026-07-11 → 07-12)
+## 9. Dynamic-length eval (`eval_stutter_binary_dynamic.py`)
+
+Everything in §8 resamples each event to a **fixed** frame budget. This variant
+accepts **variable-length** inputs so a clip's temporal extent tracks the event's
+real duration/rate. Module `artijepa/stutter_dynamic.py` (dataloader) +
+`artijepa/eval_stutter_binary_dynamic.py` (extract/probe/eval), config
+`configs/eval_stutter_binary_dynamic.yaml`, launcher
+`scripts/21_eval_stutter_binary_dynamic.sh`. **The fixed-length §8 path is untouched.**
+
+**Pipeline.** Sample each event at a target FPS (`--sample-fps 25`, or `native` ≈99)
+→ frame budget `round(dur·fps)` → tile into **K in-distribution `window`(=32)-frame
+clips**, K ∝ duration. Encode each window, **mean-pool its S' spatial tokens** → one
+vector/frame, concatenate the K windows → a variable-length sequence `[L=K·T', D]`.
+A **masked sequence probe** classifies it:
+
+- **`seq_attentive`** — a learned query attends over the L frame-vectors with a
+  key-padding mask (length-agnostic; default).
+- **`seq_lstm`** — packed bi-LSTM → masked mean of outputs.
+
+The cache is **ragged** (`[ΣL, D]` fp16 + per-clip `offsets`), kept tiny by the
+spatial pooling. Batches pad to the batch-max length + a lengths vector; the mask
+makes padding a no-op.
+
+**Why windows, not raw frames.** Every window is 32f, so the frozen 32f-pretrained
+encoder stays in-distribution — this is the correct way to get long temporal context
+(contrast §10.8, where raw 200f collapsed to 0.73 from OOD).
+
+**Measured (frozen tssl-256, LOSO, seed 0, sample_fps=25, window=32).**
+
+| item | value |
+|---|---|
+| windows/clip | min 1 · median 2 · max 7 (∝ duration) |
+| sequence length | median 32 · max 112 tokens |
+| ragged cache | **250 MB** (`[127840, 1024]` fp16); extract 476 s |
+| `seq_attentive` | macro-F1 **0.767** pooled / 0.755 mean |
+| `seq_lstm` | macro-F1 0.744 pooled / 0.730 mean (cache hit — no re-extract) |
+
+Sits above raw-200f (0.73) but below fixed-32f pooled_attentive (0.81): fixed-32f-
+spanning-the-event is a strong *normalized* view, while dynamic preserves real
+temporal scale/rate — on this corpus that trade didn't beat the fixed view at 25 fps
+(a `sample_fps`/`window` sweep is the obvious next knob). Both probe kinds share one
+extraction (switching probe is a cache hit).
+
+```bash
+bash scripts/21_eval_stutter_binary_dynamic.sh                    # seq_attentive, 25 fps
+bash scripts/21_eval_stutter_binary_dynamic.sh --probe seq_lstm   # reuses the cache
+bash scripts/21_eval_stutter_binary_dynamic.sh --sample-fps native
+```
+
+---
+
+## 10. Critical changes & decision log (binary task, 2026-07-11 → 07-12)
 
 The non-obvious decisions and gotchas behind the binary pipeline — read before
 changing it.

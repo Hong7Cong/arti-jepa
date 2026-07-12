@@ -1,0 +1,61 @@
+# Stuttering BINARY fluent-vs-disfluent — DYNAMIC (variable-length) eval.
+# Each event is sampled at `sample_fps` (or native), tiled into in-distribution
+# `window`-frame clips (K ~ duration), each window mean-pooled over spatial tokens,
+# and the K windows form a variable-length temporal sequence -> masked sequence probe.
+# Keeps the fixed-length eval_stutter_binary path untouched.
+#
+#   python -m artijepa.eval_stutter_binary_dynamic --config configs/eval_stutter_binary_dynamic.yaml
+#   ... --probe seq_lstm --sample-fps 25
+#   ... --sample-fps native
+meta:
+  out: /data1/hongn/arti-jepa/eval/stutter_binary
+  cache_dir: /data1/hongn/arti-jepa/feat_cache/stutter_binary
+  seed: 0
+  dtype: float16
+  tag: tssl256
+
+encoder:
+  checkpoint: /data1/hongn/arti-jepa/tssl_vitl_256_combined/ckpt_100.pt
+  key: target_encoder
+  model_name: vit_large
+
+data:
+  root: /data1/span_data/stuttering
+  tiers: [disfluency]
+  neg_per_pos: 1.0
+  build_seed: 0
+  min_dur: 0.20
+  max_dur: 8.0
+  merge_gap: 0.25
+  # ---- splits ----
+  split_mode: loso        # {loso, fixed, random}
+  test_speaker: PWS10
+  val_speaker: null
+  val_frac: 0.15
+  # ---- dynamic sampling: variable #windows per event ----
+  sample_fps: 25          # frames/sec sampled per event (or 'native' ~99); K = ceil(dur*fps/window)
+  window: 32              # frames per in-distribution encoder window (matches the 32f checkpoint)
+  spatial_size: 256
+  spatial_mode: resize
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  grayscale_stats: /data1/hongn/arti-jepa/grayscale_stats_combined.json  # -> (0,1) fallback if absent
+  event_pad_s: 0.0
+  extract_clip_batch: 4   # clips per extraction step (windows batched per clip on GPU)
+  num_workers: 6
+  cpu_threads: 2
+
+probe:
+  type: seq_attentive     # {seq_attentive (masked query-attn over time), seq_lstm}
+  epochs: 40
+  warmup: 4
+  lr: 1.0e-3
+  wd: 0.01
+  heads: 8
+  dropout: 0.1
+  lstm_hidden: 256        # seq_lstm only
+  lstm_layers: 1
+  bidirectional: true
+  batch_size: 64          # clips per probe step (padded to batch max length)
+  class_weight: balanced
