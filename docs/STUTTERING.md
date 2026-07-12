@@ -580,5 +580,74 @@ changing it.
    only correct way to add temporal context on a frozen 32f encoder is to encode
    in-distribution 32f windows and concatenate their tokens; do not feed 200 raw frames.
 
+---
+
+## 11. Binary results at a glance (frozen tssl-256, LOSO, seed 0)
+
+| setup | probe | frames/fps | pooled macro-F1 | cache | note |
+|---|---|---|---|---|---|
+| fixed   | attentive        | 32f    | **0.828** | 31 GiB | best; full T'·S' grid |
+| fixed   | attentive_lstm   | 32f    | 0.813 | 31 GiB | temporal LSTM; VRAM-bounded via chunk+ckpt |
+| fixed   | pooled_attentive | 32f    | 0.811 | **123 MB** | mean-spatial → attend time; tiny cache |
+| fixed   | pooled_attentive | 200f   | 0.729 | 763 MB | OOD (encoder pretrained at 32f) |
+| dynamic | seq_attentive    | 25 fps | 0.767 | 250 MB | variable-length, in-distribution windows |
+| dynamic | seq_lstm         | 25 fps | 0.744 | 250 MB | variable-length |
+
+Takeaways: full-grid `attentive` leads; `pooled_attentive` nearly matches it at 256×
+less cache; raw-200f is OOD; the dynamic path is in-distribution but 25 fps trails
+fixed-32f. All single-encoder, single-fps, single-seed — the scale-up below turns this
+into a proper benchmark.
+
+---
+
+## 12. Scale-up plan (draft) — cross-model × fps × probe benchmark
+
+Turn the single-encoder probe into a systematic, matched-protocol benchmark.
+
+**Held constant.** LOSO over 7 PWS · duration-matched fluent negatives (`seed 0`) ·
+balanced CE · macro-F1 primary (+bal-acc, acc) · pooled-spatial cache to keep RAM
+small · 3 seeds for the final headline cells.
+
+**Axis A — Encoders (each at its native geometry/norm).**
+
+| key | type | geom / norm | status |
+|---|---|---|---|
+| `tssl_vjepa` (combined ckpt_100) | vjepa | 256/32f · zscore | ✓ done |
+| `vjepa_pretrained` | vjepa | 256/32f · zscore | infra ready |
+| `videomae_pretrained` | videomae | 224/16f · minmax | port loader |
+| `videomae_tssl` (rtMRI fine-tune) | videomae | 224/16f · minmax | needs ckpt |
+| `google_vitl` | image_baseline `vitl` | per-frame · minmax | port loader |
+| `dino_vitl` | image_baseline `dinov2/3` | per-frame · minmax | port loader |
+
+**Axis B — Temporal sampling.** fixed {32f, 100f}; dynamic {native, 25, 50, 100 fps}.
+(Image baselines are per-frame → the fps sets the frame rate feeding a temporal head;
+VideoMAE is fixed 16f internally.)
+
+**Axis C — Probes.** `attentive`, `pooled_attentive`, `attentive_lstm` (fixed);
+`seq_attentive`, `seq_lstm` (dynamic); `mean`, `mlp` (cheap baselines).
+
+**Axis D — Compute report (per run).** extraction wall-time · cache size · probe peak
+VRAM · #probe params · tokens/clip — all already logged; aggregate into one table.
+
+**Phasing.**
+1. **Infra** — port `eval_disfluency`'s multi-encoder loader (`videomae`,
+   `image_baseline`) into `eval_stutter_binary[_dynamic]` (encoder-type switch +
+   per-encoder geometry/norm); add a sweep runner and a JSON→markdown aggregator.
+2. **Encoder sweep** at the canonical setting (`pooled_attentive`, 32f-equiv) → the
+   cross-model table.
+3. **FPS sweep** (dynamic, best encoder) {native, 25, 50, 100} → macro-F1-vs-rate curve.
+4. **Probe sweep** (best encoder × best temporal) → probe table.
+5. **Compute report** (Axis D) + an accuracy-vs-compute Pareto plot.
+6. **3-seed** re-run of the headline cells for CIs.
+
+**Cost.** Extraction dominates (~6 encoders × ~4 temporal settings ≈ 24 extractions,
+~10–50 min each); probes are cache-hit cheap. Pooled-spatial keeps every cache < 1 GB.
+
+**Deliverables.** an auto-aggregated `RESULTS_stutter_binary.md`; plots (macro-F1 vs
+fps per encoder; accuracy-vs-compute Pareto). **Open infra gap:** the binary evals
+currently load only the vjepa/tssl encoder — phase 1 is the prerequisite for A.
+
+---
+
 _Regenerate these statistics with the analysis over `artijepa/stutter.py`'s
 `parse_textgrid` / `canonicalize` on `/data1/span_data/stuttering/`._
