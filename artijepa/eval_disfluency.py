@@ -203,11 +203,34 @@ def extract(encoder, cfg, device, dtype):
 # --------------------------------------------------------------------------- #
 # segment probe
 # --------------------------------------------------------------------------- #
+def pool_mode_for_probe(ptype):
+    """How to reduce the encoder's [T',S',D] token grid *at extraction* per probe.
+
+      all     -> [D]        mean over both T' and S'  (mean / mlp probes)
+      spatial -> [T', D]    mean over S' only         (pooled_attentive: attend time)
+      none    -> [T'*S', D] keep the full grid        (attentive / attentive_lstm)
+
+    ``spatial`` shrinks the feature cache by S' (=256): a 200f clip goes from ~50 MB
+    to ~0.2 MB, so the whole cache fits in GPU/host RAM (no 190 GiB page-cache thrash).
+    """
+    if ptype in ("mean", "mlp"):
+        return "all"
+    if ptype == "pooled_attentive":
+        return "spatial"
+    return "none"
+
+
 class SegmentProbe(nn.Module):
     """Pool a segment's tokens -> disfluency class logits.
 
-      attentive      -- V-JEPA AttentivePooler over the whole [T'*S',D] token set -> linear.
-      attentive_lstm -- AttentivePooler over the S' SPATIAL tokens *per frame*
+      attentive        -- V-JEPA AttentivePooler over the whole [T'*S',D] token set -> linear.
+      pooled_attentive -- AttentivePooler over the TEMPORAL sequence [T',D] obtained by
+                          mean-pooling each frame's S' spatial tokens at extraction
+                          (pool_mode='spatial'). Same head as `attentive`, but over T'
+                          (=16..100) tokens not T'*S' (~4k..25k): the cache is S'x
+                          smaller and VRAM/RAM are trivial, at the cost of discarding
+                          within-frame spatial structure before the head.
+      attentive_lstm   -- AttentivePooler over the S' SPATIAL tokens *per frame*
                         (factorized: one shared pooler applied to each of the T'
                         temporal steps) -> a [T',D] sequence -> LSTM over time ->
                         linear. This decouples the quadratic spatial attention
@@ -226,7 +249,7 @@ class SegmentProbe(nn.Module):
         super().__init__()
         self.kind = kind
         self.drop = nn.Dropout(dropout)
-        if kind == "attentive":
+        if kind in ("attentive", "pooled_attentive"):
             from src.models.attentive_pooler import AttentivePooler
             self.pooler = AttentivePooler(num_queries=1, embed_dim=dim,
                                           num_heads=heads, mlp_ratio=4.0, depth=1)
@@ -275,8 +298,8 @@ class SegmentProbe(nn.Module):
         return torch.cat(outs, dim=1)                            # [B, T', D]
 
     def forward(self, x):
-        if self.kind == "attentive":                         # x: [B, L, D]
-            q = self.pooler(x).squeeze(1)                    # [B, D]
+        if self.kind in ("attentive", "pooled_attentive"):   # x: [B, L, D]
+            q = self.pooler(x).squeeze(1)                    # [B, D]  (L=T'*S' or T')
             return self.head(self.drop(q))
         if self.kind == "attentive_lstm":                    # x: [B, T'*S', D]
             B, L, D = x.shape
