@@ -395,16 +395,25 @@ the cache shape) — see `pool_mode_for_probe`:
 `attentive` and `attentive_lstm` share the full-grid cache (no re-extraction between
 them); `pooled_attentive` and `mean`/`mlp` each have their own (smaller) cache.
 
-**Measured LOSO (frozen tssl-256, 32f, seed 0):**
+**Measured LOSO (frozen tssl-256, seed 0):**
 
-| probe | cache (32f) | probe VRAM | pooled macro-F1 | mean macro-F1 |
-|---|---|---|---|---|
-| attentive        | 31 GiB  | ~7 GiB (B64)   | **0.828** | 0.816 |
-| pooled_attentive | **123 MB** | **~0.2 GiB** | 0.811 | 0.808 |
-| attentive_lstm   | 31 GiB  | ~7 GiB (B64)   | 0.813 | 0.816 |
+| probe | frames | cache | probe VRAM | pooled macro-F1 | mean macro-F1 |
+|---|---|---|---|---|---|
+| attentive        | 32f  | 31 GiB  | ~7 GiB (B64)   | **0.828** | 0.816 |
+| pooled_attentive | 32f  | **123 MB** | **~0.2 GiB** | 0.811 | 0.808 |
+| attentive_lstm   | 32f  | 31 GiB  | ~7 GiB (B64)   | 0.813 | 0.816 |
+| pooled_attentive | 200f | 763 MB  | ~0.2 GiB       | 0.729 | 0.685 |
 
-`pooled_attentive` costs ~1.5 macro-F1 points vs the full grid but shrinks the cache
-**256×** and probe VRAM ~35× — the practical choice when the full grid won't fit (200f).
+At 32f, `pooled_attentive` costs ~1.5 macro-F1 points vs the full grid but shrinks the
+cache **256×** and probe VRAM ~35× — the practical choice when the full grid won't fit.
+
+> ⚠️ **200f is worse, not better.** `pooled_attentive` @ 200f mechanically *works* — the
+> cache is 0.76 GiB, it fits one GPU at 12 GiB, extraction ~52 min — but macro-F1
+> **drops to 0.73/0.69**. Cause: feeding 200 raw frames to the **32f-pretrained RoPE
+> encoder is far out-of-distribution** (§ geometry note). More frames ≠ better features
+> when the encoder never saw that temporal length. To use ~200 frames of context, encode
+> in-distribution **32f windows** and concatenate their temporal tokens — do not feed 200
+> raw frames to this encoder.
 
 ```bash
 bash scripts/20_eval_stutter_binary.sh --probe pooled_attentive     # tiny cache, temporal attn
@@ -510,6 +519,15 @@ changing it.
    0.808** — ~1.5 pts below the full grid but at a **256× smaller cache** (123 MB) and
    ~0.2 GiB probe VRAM, so it's the go-to when the grid won't fit. Curves + history via
    `plot_stutter_binary.py` (GPU-preloads the cache for speed).
+
+8. **200f is out-of-distribution — negative result (2026-07-12).** Ran
+   `pooled_attentive --frames 200` to test the high-frame path end-to-end. The
+   *engineering* worked perfectly: cache 0.76 GiB, one GPU at 12 GiB, extraction 52 min
+   — the 190 GiB-cache problem is gone. But macro-F1 **fell to 0.729 pooled / 0.685
+   mean** (from 0.811 / 0.808 at 32f). The 32f-pretrained RoPE encoder never saw
+   200-frame sequences, so its features degrade — **more frames ≠ better here**. The
+   only correct way to add temporal context on a frozen 32f encoder is to encode
+   in-distribution 32f windows and concatenate their tokens; do not feed 200 raw frames.
 
 _Regenerate these statistics with the analysis over `artijepa/stutter.py`'s
 `parse_textgrid` / `canonicalize` on `/data1/span_data/stuttering/`._
