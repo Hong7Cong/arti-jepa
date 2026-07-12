@@ -1,0 +1,57 @@
+# Stuttering disfluency-type classification (Arti-JEPA eval Task 8).
+# Segment-level: each labeled disfluency interval -> one clip -> attentive-pooled
+# feature -> disfluency-type class. CANONICAL setup = attentive probe, 256px
+# (matched to the 256px T-SSL encoder), leave-one-speaker-out over the 7 PWS.
+#
+# Encoders (override with --model / --encoder / --mode):
+#   * default     : frozen V-JEPA2 pretrained (baseline). --encoder <ckpt> for T-SSL.
+#   * --model videomae            : frozen VideoMAE-L (forces 224px/16f natively).
+#   * --mode finetune --model videomae : fine-tune VideoMAE-L end-to-end.
+#   * --model {clip|siglip|dinov2|vitl|resnet} : frozen image baselines.
+meta:
+  out: /data2/hongn/artijepa/eval
+  cache_dir: /data2/hongn/artijepa/feat_cache/disfluency
+  seed: 0
+  dtype: bfloat16
+  mode: frozen            # {frozen, finetune}
+  tag: null
+
+data:
+  manifest: /data1/span_data/stuttering/disfluency_manifest.csv
+  tiers: [disfluency]     # primary tier; add disfluency2 to include the rep-heavy secondary
+  task: type5             # {type5: block/rep/pro/osci/other, type3: block/rep/pro, binary}
+  split_mode: loso        # {loso: leave-one-speaker-out, random: stratified 60/20/20}
+  val_frac: 0.15
+  event_pad_s: 0.15       # seconds of context padded around each interval
+  grayscale_stats: /data2/hongn/artijepa/grayscale_stats.json
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32     # 32 frames uniformly spanning the event; tubelet 2 -> 16 tokens
+  target_fps: 50.0
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  batch_size: 8
+  num_workers: 4
+
+encoder:
+  type: vjepa             # {vjepa, image_baseline, videomae}
+  spec: pretrained
+  model_name: vit_large
+  checkpoint: null
+  key: auto
+  grid_cap: 16            # cap the spatial grid side for the attentive token set
+  freeze_encoder: false   # finetune mode: true -> probe-only on VideoMAE features
+
+probe:
+  type: attentive         # {attentive (canonical), mean, mlp}
+  epochs: 40
+  warmup: 4
+  lr: 1.0e-3
+  encoder_lr: 1.0e-5      # finetune mode only
+  wd: 0.01
+  hidden: 512
+  heads: 8
+  dropout: 0.1
+  batch_size: 64          # frozen probe; finetune uses data.batch_size for clips
+  class_weight: balanced  # inverse-frequency CE (severe class imbalance)

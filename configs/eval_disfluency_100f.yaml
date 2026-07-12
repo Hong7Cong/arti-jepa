@@ -1,0 +1,57 @@
+# Disfluency-type eval — 4-encoder frozen comparison (2026-06-30 request).
+# Frozen features from V-JEPA2 / VideoMAE / Google ViT-L / DINOv3 ViT-L; only the
+# attentive-probe HEAD is trained. Settings: 50 fps, 100-frame clips (~2 s, the
+# mean disfluency duration) -> 50 temporal tokens; 256px for the video/vjepa path.
+# ONE fixed, subject-disjoint split shared by all encoders (test=PWS5, val=PWS10).
+#
+#   VideoMAE is architecturally fixed at 16 frames -> it runs at 16f (uniformly
+#   sampled across the same 2 s window); the others honor the full 100 frames.
+#
+# Launch all four via scripts/16_eval_disfluency.sh (see 17_disfluency_4enc.sh).
+meta:
+  out: /data2/hongn/artijepa/eval/disfluency_4enc
+  cache_dir: /data2/hongn/artijepa/feat_cache/disfluency_100f
+  seed: 0
+  dtype: bfloat16
+  mode: frozen
+  tag: null
+
+data:
+  manifest: /data1/span_data/stuttering/disfluency_manifest.csv
+  tiers: [disfluency]
+  task: type3             # overridden per run (type3 / type5) — cache is task-independent
+  split_mode: fixed
+  test_speaker: PWS5
+  val_speaker: PWS10
+  event_pad_s: 0.15
+  grayscale_stats: /data2/hongn/artijepa/grayscale_stats.json
+  spatial_size: 256       # V-JEPA2 path; image/videomae baselines use their native input
+  spatial_mode: resize
+  frames_per_clip: 100    # 2 s @ 50 fps; VideoMAE forces 16f internally
+  target_fps: 50.0
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  batch_size: 4           # 100f/256px extraction batch
+  num_workers: 4
+
+encoder:
+  type: vjepa             # {vjepa, image_baseline, videomae} (set by --model)
+  spec: pretrained        # pretrained V-JEPA2 vitl.pt (downloads on first use)
+  model_name: vit_large
+  checkpoint: null
+  key: auto
+  grid_cap: 8             # spatial grid side cap -> 64 spatial tokens/frame (fair across encoders)
+  frame_batch: 32         # per-frame sub-batch for the image/videomae baselines
+
+probe:
+  type: attentive         # attentive pool over all [T'*S'] tokens -> linear head
+  epochs: 40
+  warmup: 4
+  lr: 1.0e-3
+  wd: 0.01
+  hidden: 512
+  heads: 8
+  dropout: 0.1
+  batch_size: 64
+  class_weight: balanced
