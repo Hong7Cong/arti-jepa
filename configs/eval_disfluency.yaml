@@ -9,21 +9,21 @@
 #   * --mode finetune --model videomae : fine-tune VideoMAE-L end-to-end.
 #   * --model {clip|siglip|dinov2|vitl|resnet} : frozen image baselines.
 meta:
-  out: /data2/hongn/artijepa/eval
-  cache_dir: /data2/hongn/artijepa/feat_cache/disfluency
+  out: /scratch1/hongn/artijepa/eval
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/disfluency
   seed: 0
   dtype: bfloat16
   mode: frozen            # {frozen, finetune}
   tag: null
 
 data:
-  manifest: /data1/span_data/stuttering/disfluency_manifest.csv
+  manifest: /scratch1/hongn/stuttering/disfluency_manifest.csv
   tiers: [disfluency]     # primary tier; add disfluency2 to include the rep-heavy secondary
   task: type5             # {type5: block/rep/pro/osci/other, type3: block/rep/pro, binary}
   split_mode: loso        # {loso: leave-one-speaker-out, random: stratified 60/20/20}
   val_frac: 0.15
   event_pad_s: 0.15       # seconds of context padded around each interval
-  grayscale_stats: /data2/hongn/artijepa/grayscale_stats.json
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
   spatial_size: 256
   spatial_mode: resize
   frames_per_clip: 32     # 32 frames uniformly spanning the event; tubelet 2 -> 16 tokens

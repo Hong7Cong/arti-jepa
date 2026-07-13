@@ -12,26 +12,26 @@
 #   python -m artijepa.eval_stutter_binary --config configs/eval_stutter_binary.yaml
 #   ... --probe mean            # cheaper linear-on-mean-pool probe
 #   ... --split fixed --test-speaker PWS10 --val-speaker PWS7
-# NOTE: all persistent artifacts (feature cache + result JSON) live on /data1
+# NOTE: all persistent artifacts (feature cache + result JSON) live on /scratch1
 # (the /data2/hongn/artijepa tree was moved here 2026-07-11). The 256px combined
 # checkpoint was trained with grayscale_stats_combined.json; that file was NOT
 # preserved in the move, so global channel-norm falls back to mean=0/std=1 -- which
 # compute_stats.py documents these values land near anyway (they are computed on
 # already per-clip z-scored clips). Restore the json at the path below to override.
 meta:
-  out: /data1/hongn/arti-jepa/eval/stutter_binary
-  cache_dir: /data1/hongn/arti-jepa/feat_cache/stutter_binary
+  out: /scratch1/hongn/artijepa/eval/stutter_binary
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/stutter_binary
   seed: 0
   dtype: float16
   tag: tssl256
 
 encoder:
-  checkpoint: /data1/hongn/arti-jepa/tssl_vitl_256_combined/ckpt_100.pt
+  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_100.pt
   key: target_encoder     # EMA target-encoder weights (keys already backbone.*)
   model_name: vit_large
 
 data:
-  root: /data1/span_data/stuttering
+  root: /scratch1/hongn/stuttering
   tiers: [disfluency]     # positive events come from the primary disfluency tier
   # ---- binary-row builder (stutter_binary.build_rows) ----
   neg_per_pos: 1.0        # ~1:1 fluent negatives, duration-matched to positives
@@ -51,7 +51,7 @@ data:
   tubelet_size: 2
   patch_size: 16
   intensity_norm: zscore
-  grayscale_stats: /data1/hongn/arti-jepa/grayscale_stats_combined.json  # -> (0,1) fallback if absent
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats_combined.json  # -> (0,1) fallback if absent
   event_pad_s: 0.0        # clip = the event / matched-fluent window exactly
   batch_size: 8
   # ---- CPU budget: total cores ~= num_workers (1 core each) + cpu_threads ----

@@ -6,7 +6,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/_env.sh"
-ROOT="${STUTTER_ROOT:-/data1/span_data/stuttering}"
+ROOT="${STUTTER_ROOT:-/scratch1/hongn/stuttering}"
 FLUENT=0
 [ "${1:-}" = "--fluent-per-file" ] && FLUENT="${2:-3}"
 python - "$ROOT" "$FLUENT" <<'PY'

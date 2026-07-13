@@ -9,22 +9,22 @@
 #
 # Launch all four via scripts/16_eval_disfluency.sh (see 17_disfluency_4enc.sh).
 meta:
-  out: /data2/hongn/artijepa/eval/disfluency_4enc
-  cache_dir: /data2/hongn/artijepa/feat_cache/disfluency_100f
+  out: /scratch1/hongn/artijepa/eval/disfluency_4enc
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/disfluency_100f
   seed: 0
   dtype: bfloat16
   mode: frozen
   tag: null
 
 data:
-  manifest: /data1/span_data/stuttering/disfluency_manifest.csv
+  manifest: /scratch1/hongn/stuttering/disfluency_manifest.csv
   tiers: [disfluency]
   task: type3             # overridden per run (type3 / type5) — cache is task-independent
   split_mode: fixed
   test_speaker: PWS5
   val_speaker: PWS10
   event_pad_s: 0.15
-  grayscale_stats: /data2/hongn/artijepa/grayscale_stats.json
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
   spatial_size: 256       # V-JEPA2 path; image/videomae baselines use their native input
   spatial_mode: resize
   frames_per_clip: 100    # 2 s @ 50 fps; VideoMAE forces 16f internally

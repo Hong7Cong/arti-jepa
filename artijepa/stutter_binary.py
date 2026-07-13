@@ -55,7 +55,7 @@ from artijepa import stutter as S
 from artijepa.stutter import FLUENT, MANIFEST_COLS, _stem_media, canonicalize
 from artijepa.rtmri_dataset import PreprocConfig, _intensity_norm, _spatial, _to_gray
 
-ROOT = "/data1/span_data/stuttering"
+ROOT = "/scratch1/hongn/stuttering"
 SPEAKERS = ("PWS3", "PWS4", "PWS5", "PWS6", "PWS7", "PWS8", "PWS10")
 GRAYSCALE_STATS = "/data2/hongn/artijepa/grayscale_stats.json"
 

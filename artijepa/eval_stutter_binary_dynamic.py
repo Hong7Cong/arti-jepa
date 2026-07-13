@@ -206,6 +206,22 @@ def _predict(clf, feats, offsets, idx, y, device, bs=128):
     return np.concatenate(out) if out else np.zeros(0, dtype=np.int64)
 
 
+@torch.no_grad()
+def _eval_val(clf, feats, offsets, idx, y_idx, device, lossf, bs=128):
+    """Val preds + mean CE loss. ``y_idx`` must be y sliced to ``idx`` (matches _RaggedDS)."""
+    clf.eval()
+    loader = torch.utils.data.DataLoader(_RaggedDS(feats, offsets, idx, y_idx),
+                                         batch_size=bs, shuffle=False,
+                                         collate_fn=_collate_ragged)
+    preds, tot, nb = [], 0.0, 0
+    for x, lengths, yy in loader:
+        logits = clf(x.to(device), lengths)
+        tot += float(lossf(logits, yy.to(device))); nb += 1
+        preds.append(logits.argmax(-1).cpu().numpy())
+    p = np.concatenate(preds) if preds else np.zeros(0, dtype=np.int64)
+    return p, tot / max(1, nb)
+
+
 def train_probe(cfg, feats, offsets, y, tr, va, te, spk_te, device, classes):
     """Train DynamicSeqProbe on tr, model-select on va (macro-F1), predict te."""
     pc = cfg["probe"]; nc = len(classes); dim = feats.shape[-1]
@@ -235,15 +251,16 @@ def train_probe(cfg, feats, offsets, y, tr, va, te, spk_te, device, classes):
             opt.zero_grad()
             loss = lossf(clf(x, lengths), yy)
             loss.backward(); opt.step(); run += float(loss); nb += 1
-        vp = _predict(clf, feats, offsets, va, y, device)
+        vp, vloss = _eval_val(clf, feats, offsets, va, y[va], device, lossf)
         vm = S.classification_metrics(y[va], vp, nc, classes)
         if vm["macro_f1"] > best["val_f1"]:
             tp = _predict(clf, feats, offsets, te, y, device)
             tm = S.classification_metrics(y[te], tp, nc, classes)
             best = {"val_f1": vm["macro_f1"], "test": tm, "pred": tp}
-        if ep % 10 == 0 or ep == epochs - 1:
-            print(f"[dyn-probe {spk_te} e{ep+1}/{epochs}] loss={run/max(1,nb):.3f} "
-                  f"val macroF1={vm['macro_f1']:.3f} best={best['val_f1']:.3f}")
+        rec = "/".join(f"{c[:3]}={vm['per_class'][c]['recall']}" for c in classes)
+        print(f"[dyn-probe {spk_te} e{ep+1}/{epochs}] tr_loss={run/max(1,nb):.3f} "
+              f"val_loss={vloss:.3f} val_kappa={vm['cohen_kappa']:.3f} "
+              f"val_macroF1={vm['macro_f1']:.3f} best={best['val_f1']:.3f} | recall {rec}")
     return best["test"], best["pred"], best["val_f1"]
 
 

@@ -1,7 +1,7 @@
 """Stuttering corpus: TextGrid parsing, disfluency-type canonicalization,
 manifest building, and a segment-level dataset (Arti-JEPA eval Task 8).
 
-`/data1/span_data/stuttering/PWS{3,4,5,6,7,8,10}` -- 7 persons-who-stutter (PWS),
+`/scratch1/hongn/stuttering/PWS{3,4,5,6,7,8,10}` -- 7 persons-who-stutter (PWS),
 104x104 rtMRI @ ~99 fps (same geometry as usc_lss), with `.TextGrid` annotations
 paired 1:1 to `avi/<stem>.avi` and `wav/<stem>.wav`.
 
@@ -135,7 +135,7 @@ MANIFEST_COLS = [
 ]
 
 
-def build_manifest(root="/data1/span_data/stuttering", out_csv=None,
+def build_manifest(root="/scratch1/hongn/stuttering", out_csv=None,
                    speakers=("PWS3", "PWS4", "PWS5", "PWS6", "PWS7", "PWS8", "PWS10"),
                    tiers=("disfluency", "disfluency2"),
                    fluent_per_file=0, min_dur=0.10, max_dur=8.0, verbose=True):
@@ -362,7 +362,11 @@ def classification_metrics(y_true, y_pred, num_classes, class_names=None):
     present = support > 0                            # classes with >=1 true example
     macro_f1 = float(np.nanmean(np.where(present, f1, np.nan))) if present.any() else 0.0
     bal_acc = float(np.nanmean(recall[present])) if present.any() else 0.0
-    acc = float(tp.sum() / max(1, cm.sum()))
+    N = max(1, cm.sum())
+    acc = float(tp.sum() / N)
+    # Cohen's kappa: (p_o - p_e) / (1 - p_e), chance-corrected agreement.
+    p_e = float((support * pred_pos).sum() / (N * N))
+    kappa = float((acc - p_e) / (1 - p_e)) if (1 - p_e) > 1e-12 else 0.0
     names = class_names or [str(i) for i in range(num_classes)]
     per_class = {
         names[i]: {
@@ -373,6 +377,6 @@ def classification_metrics(y_true, y_pred, num_classes, class_names=None):
     }
     return {
         "macro_f1": round(macro_f1, 4), "balanced_acc": round(bal_acc, 4),
-        "accuracy": round(acc, 4), "n": int(cm.sum()),
+        "accuracy": round(acc, 4), "cohen_kappa": round(kappa, 4), "n": int(cm.sum()),
         "per_class": per_class, "confusion": cm.tolist(),
     }
