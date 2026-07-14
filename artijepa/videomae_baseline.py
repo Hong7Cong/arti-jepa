@@ -32,6 +32,8 @@ Two env fixes are required for this checkpoint under transformers 5.x / torch 2.
     true pretrained model. `_restore_attn_biases` copies the trained q/v biases back.
 """
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -78,6 +80,48 @@ def _restore_attn_biases(model, model_name):
     return n
 
 
+def _repo_to_hf_state_dict(raw, n_layers, dim):
+    """Convert an ORIGINAL-VideoMAE (MAE-repo `.pth`) checkpoint to HF `VideoMAEModel`
+    keys so a locally continue-pretrained encoder (e.g. the rt-MRI `checkpoint-214.pth`)
+    can be loaded without an HF export.
+
+    Repo->HF per block: `norm1/2`->`layernorm_before/after`; the fused `attn.qkv.weight`
+    [3*dim,dim] is split into `attention.attention.{query,key,value}.weight`; the learned
+    `q_bias`/`v_bias` map to `query/value.bias` with `key.bias` = 0 (BEiT-style, matching
+    `_restore_attn_biases`); `attn.proj`->`attention.output.dense`; `mlp.fc1/fc2`->
+    `intermediate.dense`/`output.dense`. The pretraining decoder, `mask_token`, and
+    `encoder_to_decoder` are dropped (encoder-only). -> exactly the HF param set.
+    """
+    m = raw.get("model", raw)
+    m = {k[len("module."):] if k.startswith("module.") else k: v for k, v in m.items()}
+    hf = {
+        "embeddings.patch_embeddings.projection.weight": m["encoder.patch_embed.proj.weight"],
+        "embeddings.patch_embeddings.projection.bias":   m["encoder.patch_embed.proj.bias"],
+        "layernorm.weight": m["encoder.norm.weight"],
+        "layernorm.bias":   m["encoder.norm.bias"],
+    }
+    for i in range(n_layers):
+        r, h = f"encoder.blocks.{i}.", f"encoder.layer.{i}."
+        hf[h + "layernorm_before.weight"] = m[r + "norm1.weight"]
+        hf[h + "layernorm_before.bias"]   = m[r + "norm1.bias"]
+        hf[h + "layernorm_after.weight"]  = m[r + "norm2.weight"]
+        hf[h + "layernorm_after.bias"]    = m[r + "norm2.bias"]
+        qkv = m[r + "attn.qkv.weight"]                     # [3*dim, dim], order q,k,v
+        hf[h + "attention.attention.query.weight"] = qkv[:dim]
+        hf[h + "attention.attention.key.weight"]   = qkv[dim:2 * dim]
+        hf[h + "attention.attention.value.weight"] = qkv[2 * dim:]
+        hf[h + "attention.attention.query.bias"] = m[r + "attn.q_bias"]
+        hf[h + "attention.attention.value.bias"] = m[r + "attn.v_bias"]
+        hf[h + "attention.attention.key.bias"]   = torch.zeros_like(m[r + "attn.q_bias"])
+        hf[h + "attention.output.dense.weight"] = m[r + "attn.proj.weight"]
+        hf[h + "attention.output.dense.bias"]   = m[r + "attn.proj.bias"]
+        hf[h + "intermediate.dense.weight"] = m[r + "mlp.fc1.weight"]
+        hf[h + "intermediate.dense.bias"]   = m[r + "mlp.fc1.bias"]
+        hf[h + "output.dense.weight"] = m[r + "mlp.fc2.weight"]
+        hf[h + "output.dense.bias"]   = m[r + "mlp.fc2.bias"]
+    return hf
+
+
 def _select_frames(x, n_frames):
     """[B,T,C,H,W] -> [B,n_frames,C,H,W] by evenly spaced nearest-frame indexing."""
     T = x.shape[1]
@@ -99,11 +143,29 @@ class VideoMAEBackbone(nn.Module):
     """
 
     def __init__(self, model_name=DEFAULT_VIDEOMAE, frame_batch=8,
-                 pool_spatial=True, grid_cap=16, **_):
+                 pool_spatial=True, grid_cap=16, checkpoint=None, **_):
         super().__init__()
-        self.name = model_name
-        self.model = VideoMAEModel.from_pretrained(model_name)
-        _restore_attn_biases(self.model, model_name)   # fix q/v biases dropped by from_pretrained
+        if checkpoint:
+            # Locally continue-pretrained encoder in MAE-repo `.pth` format (e.g. the
+            # rt-MRI ckpt): build the HF architecture from config (no Kinetics download),
+            # remap repo->HF keys, and load strictly -> the true trained encoder.
+            from transformers.models.videomae.modeling_videomae import VideoMAEConfig
+            cfg = VideoMAEConfig.from_pretrained(model_name)
+            self.model = VideoMAEModel(cfg)
+            raw = torch.load(checkpoint, map_location="cpu", weights_only=False)
+            hf_sd = _repo_to_hf_state_dict(raw, cfg.num_hidden_layers, cfg.hidden_size)
+            missing, unexpected = self.model.load_state_dict(hf_sd, strict=False)
+            if missing or unexpected:
+                raise RuntimeError(
+                    f"VideoMAE repo->HF load incomplete: {len(missing)} missing "
+                    f"{missing[:3]} / {len(unexpected)} unexpected {unexpected[:3]}")
+            self.name = f"{model_name}::{os.path.basename(checkpoint)}"
+            print(f"[videomae] rt-MRI repo ckpt {checkpoint} (epoch "
+                  f"{raw.get('epoch')}) -> {len(hf_sd)} HF tensors, 0 missing/unexpected")
+        else:
+            self.name = model_name
+            self.model = VideoMAEModel.from_pretrained(model_name)
+            _restore_attn_biases(self.model, model_name)  # fix q/v biases dropped by from_pretrained
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad = False
@@ -168,10 +230,11 @@ class VideoMAEEncoder(nn.Module):
     object in the extractor (same role as `baselines.BaselineEncoder`)."""
 
     def __init__(self, model_name=DEFAULT_VIDEOMAE, frame_batch=8,
-                 pool_spatial=True, grid_cap=16, **_):
+                 pool_spatial=True, grid_cap=16, checkpoint=None, **_):
         super().__init__()
         self.backbone = VideoMAEBackbone(model_name, frame_batch=frame_batch,
-                                         pool_spatial=pool_spatial, grid_cap=grid_cap)
+                                         pool_spatial=pool_spatial, grid_cap=grid_cap,
+                                         checkpoint=checkpoint)
 
 
 class VideoMAEClassifier(nn.Module):

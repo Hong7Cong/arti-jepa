@@ -1,0 +1,52 @@
+# Phoneme-prediction eval -- CROSS-DOMAIN (Annot-16 train -> in-domain + usc_lss OOD),
+# rt-MRI VideoMAE encoder (ckpt-214). This is the `videomae_rtmri` row (#6) of
+# RESULTS_phonepred.md / docs/phonePred.md -- the SAME fixed cross-domain split used by
+# the other baselines, so it is directly comparable:
+#   train    = 14 Annot-16 speakers          (75-Speaker rt-MRI)
+#   val      = Annot-16 sub030               (model selection)
+#   test     = Annot-16 sub043               (in-domain held-out)
+#   test_lss = all usc_lss                   (cross-domain OOD held-out)
+# Encoder = our rt-MRI continue-pretrained VideoMAE-L (checkpoint-214.pth, MAE-repo
+# format), loaded via the in-memory repo->HF remap (videomae_baseline, spec
+# 'videomae_rtmri' -> its own feature cache). VideoMAE fixes geometry to 224px/16f/
+# tubelet2 (overrides the values below), same as the Kinetics `videomae` row.
+meta:
+  out: /scratch1/hongn/artijepa/eval
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/phoneme
+  seed: 0
+  dtype: float16          # V100 (no bf16)
+  tag: videomae_rtmri
+  save_probe: true
+
+encoder:
+  type: videomae
+  model: MCG-NJU/videomae-large   # HF architecture/config base (weights from checkpoint)
+  checkpoint: /scratch1/hongn/videomae_ct/runs/vitl_rtmri_combined_ct/checkpoint-214.pth
+  grid_cap: 16
+
+probe:                    # identical to the matrix baselines (attentive / ce)
+  type: attentive
+  loss: ce
+  epochs: 30
+  warmup: 4
+  lr: 1.0e-3
+  wd: 0.01
+  hidden: 512
+  batch_size: 32
+  workers: 8
+  buf: 96
+  ipe: null
+
+data:
+  kind: usc_lss           # generic gold-phoneme dataloader (manifest + per-utt json)
+  manifest: /scratch1/hongn/annot16_phonemes/phoneme_manifest_combined.csv
+  extra_test_splits: [test_lss]   # 2nd held-out test (usc_lss OOD) w/ the best-val probe
+  spatial_size: 256       # OVERRIDDEN to 224 by VideoMAE
+  spatial_mode: resize
+  frames_per_clip: 32     # OVERRIDDEN to 16 by VideoMAE
+  target_fps: 50.0
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore  # OVERRIDDEN to minmax by VideoMAE
+  batch_size: 16
+  num_workers: 4

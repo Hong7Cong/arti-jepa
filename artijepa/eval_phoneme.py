@@ -28,6 +28,7 @@ Run:
 import argparse
 import hashlib
 import json
+import mmap
 import os
 import time
 
@@ -61,7 +62,8 @@ def load_frozen_encoder(cfg, device):
         from artijepa.videomae_baseline import VideoMAEEncoder, VIDEOMAE_LARGE
         enc = VideoMAEEncoder(ec.get("model", VIDEOMAE_LARGE),
                               pool_spatial=d.get("pool_spatial", True),
-                              grid_cap=ec.get("grid_cap", 16)).to(device)
+                              grid_cap=ec.get("grid_cap", 16),
+                              checkpoint=ec.get("checkpoint")).to(device)
         enc.eval()
         for p in enc.parameters():
             p.requires_grad = False
@@ -70,7 +72,7 @@ def load_frozen_encoder(cfg, device):
         d["tubelet_size"] = enc.backbone.tubelet                # 2 -> T'=8 tokens
         d["intensity_norm"] = "minmax"
         d.pop("grayscale_stats", None)
-        ec["spec"] = "videomae_large"                           # feature cache/tag key
+        ec["spec"] = "videomae_rtmri" if ec.get("checkpoint") else "videomae_large"  # feature cache/tag key
         mode = "pooled [B,T',D]" if enc.backbone.pool_spatial else \
             f"un-pooled grid [B,T',S'<= {enc.backbone.grid_cap}^2,D]"
         print(f"[ph-eval] videomae {enc.backbone.name} D={enc.backbone.embed_dim} "
@@ -213,8 +215,21 @@ def extract(encoder, cfg, split, device, dtype):
                                               shape=(N,) + tok.shape[1:])
         feats[pos:pos + B] = tok
         labels.append(lab.numpy()); meta += m; pos += B
-        if bi % 20 == 0:
-            print(f"[ph-eval]  extract {split} {pos}/{N} ({time.time()-t0:.0f}s)")
+        if bi % 10 == 0:
+            # Bound RSS: for the spatial (un-pooled) grid the memmap is tens-hundreds of
+            # GB, and its written pages stay resident and are charged to the job's memory
+            # cgroup -> OOM under a small --mem. Flush to disk, then MADV_DONTNEED the
+            # mapping so those pages are reclaimed (re-read from disk only if accessed;
+            # extraction never reads back, so RSS stays flat). NOTE: fadvise() on a
+            # separate fd does NOT reclaim pages still mapped by the memmap -- madvise on
+            # the mmap itself does. Does NOT change the on-disk output.
+            feats.flush()
+            try:
+                feats._mmap.madvise(mmap.MADV_DONTNEED)
+            except (AttributeError, OSError):
+                pass
+            if bi % 20 == 0:
+                print(f"[ph-eval]  extract {split} {pos}/{N} ({time.time()-t0:.0f}s)")
     feats.flush()
     labels = np.concatenate(labels).astype(np.int64)
     meta = np.asarray(meta, dtype=np.int64)
@@ -329,6 +344,50 @@ class _FeatDS(torch.utils.data.Dataset):
                 torch.from_numpy(np.array(self.labels[i])))
 
 
+class _FeatStream(torch.utils.data.IterableDataset):
+    """Streaming, bounded-RAM TRAIN loader for the spatial (un-pooled) feature cache.
+
+    A full random-shuffle pass over that cache re-reads tens-hundreds of GB from disk
+    every epoch at random-access speed (~tens of MB/s) when it can't fit in page cache
+    under a small --mem job -- the probe's I/O wall. Instead, each DataLoader worker
+    reads ONE CONTIGUOUS block of rows SEQUENTIALLY (readahead-friendly, ~bandwidth
+    speed; on a striped FS the workers' concurrent streams parallelise across targets)
+    and emits them through a small in-RAM shuffle buffer of `buf` rows. Resident RAM is
+    bounded at ~= workers * buf * row_bytes (f16). Global mixing comes from the workers
+    streaming different file regions at once + the local buffer. Optional `max_samples`
+    (= probe.ipe * batch_size) caps rows/epoch for a fixed iterations-per-epoch budget.
+    Val/test keep the deterministic full pass (predict()/_FeatDS), so metrics are exact.
+    """
+    def __init__(self, feats, labels, buf=96, max_samples=None):
+        self.feats, self.labels = feats, labels
+        self.buf = max(1, int(buf))
+        self.max_samples = max_samples
+
+    def __iter__(self):
+        N = len(self.labels)
+        wi = torch.utils.data.get_worker_info()
+        nw = wi.num_workers if wi else 1
+        wid = wi.id if wi else 0
+        lo, hi = (N * wid) // nw, (N * (wid + 1)) // nw      # this worker's block
+        cap = None if self.max_samples is None else max(1, -(-self.max_samples // nw))
+        buf, out = [], 0
+        for i in range(lo, hi):
+            buf.append((np.array(self.feats[i], dtype=np.float16),   # sequential disk read
+                        np.asarray(self.labels[i])))
+            if len(buf) >= self.buf:
+                f, l = buf.pop(np.random.randint(len(buf)))          # local shuffle
+                yield torch.from_numpy(f.astype(np.float32)), torch.from_numpy(l.copy())
+                out += 1
+                if cap is not None and out >= cap:
+                    return
+        while buf:                                                   # drain remainder
+            f, l = buf.pop(np.random.randint(len(buf)))
+            yield torch.from_numpy(f.astype(np.float32)), torch.from_numpy(l.copy())
+            out += 1
+            if cap is not None and out >= cap:
+                return
+
+
 @torch.no_grad()
 def predict(clf, feats, device, bs=128):
     clf.eval(); out = []
@@ -387,7 +446,11 @@ def load_probe(path, device="cpu"):
 
 
 def train_probe(cfg, ftr, ltr, fva, lva, mva, fte, lte, mte,
-                ref_va, ref_te, device, num_classes, drop=(P.SIL_IDX,)):
+                ref_va, ref_te, device, num_classes, drop=(P.SIL_IDX,),
+                extra_tests=None):
+    """extra_tests: optional {name: (feats, labels, meta, ref_seqs)} evaluated with
+    the best-val probe alongside the primary `test` split (e.g. a cross-domain
+    held-out set). Results land in best['tests'][name]."""
     pc = cfg["probe"]
     dim = ftr.shape[-1]
     clf = TokenProbe(dim, num_classes, kind=pc.get("type", "tcn"),
@@ -397,9 +460,17 @@ def train_probe(cfg, ftr, ltr, fva, lva, mva, fte, lte, mte,
                             weight_decay=pc.get("wd", 0.01))
     lossf = nn.CrossEntropyLoss(ignore_index=P.IGNORE_INDEX)
     epochs, warmup, base = pc.get("epochs", 40), pc.get("warmup", 4), pc.get("lr", 1e-3)
+    # TRAIN loader: bounded-RAM sequential streaming (see _FeatStream). Sequential per-
+    # worker reads + concurrent workers recover FS bandwidth vs the ~tens-of-MB/s random
+    # full-shuffle pass; probe.ipe (micro-batches/epoch) optionally caps rows/epoch.
+    p_workers = pc.get("workers", 8)
+    train_stream = _FeatStream(
+        ftr, ltr, buf=pc.get("buf", 96),
+        max_samples=(pc["ipe"] * pc.get("batch_size", 32)) if pc.get("ipe") else None)
     loader = torch.utils.data.DataLoader(
-        _FeatDS(ftr, ltr), batch_size=pc.get("batch_size", 32), shuffle=True,
-        num_workers=cfg["data"].get("num_workers", 4), drop_last=False)
+        train_stream, batch_size=pc.get("batch_size", 32),
+        num_workers=p_workers, persistent_workers=(p_workers > 0),
+        drop_last=False)
     best = {"val_kappa": -1.0}; best_state = None; history = []
     for ep in range(epochs):
         lr = base * (ep + 1) / max(1, warmup) if ep < warmup else \
@@ -421,6 +492,10 @@ def train_probe(cfg, ftr, ltr, fva, lva, mva, fte, lte, mte,
             tm = evaluate(predict(clf, fte, device), lte, mte, ref_te, num_classes, drop)
             best = {"epoch": ep + 1, "val_kappa": vm["kappa"], "val": vm, "test": tm,
                     "train_loss": tr_loss}
+            if extra_tests:
+                best["tests"] = {
+                    nm: evaluate(predict(clf, ef, device), el, em, er, num_classes, drop)
+                    for nm, (ef, el, em, er) in extra_tests.items()}
             best_state = _cpu_state(clf)            # snapshot best-val weights
         if ep % 5 == 0 or ep == epochs - 1:
             print(f"[probe e{ep+1}/{epochs}] loss={tr_loss:.3f} lr={lr:.2e} "
@@ -509,9 +584,11 @@ def _ctc_eval(clf, utt_feats, refs, device, blank, drop, bs=16):
 
 
 def train_probe_ctc(cfg, utt_tr, ref_tr, utt_va, ref_va, utt_te, ref_te,
-                    device, num_classes, drop=()):
+                    device, num_classes, drop=(), extra_tests=None):
     """Train the probe with CTC (blank = num_classes). PER-primary; no kappa
-    (undefined without forced alignment). Model-selection on val PER (lower=better)."""
+    (undefined without forced alignment). Model-selection on val PER (lower=better).
+    extra_tests: optional {name: (utt_feats, ref_seqs)} evaluated with the best-val
+    probe alongside the primary test split. Results land in best['tests'][name]."""
     pc = cfg["probe"]
     dim = next(iter(utt_tr.values())).shape[-1]
     blank = num_classes
@@ -548,6 +625,10 @@ def train_probe_ctc(cfg, utt_tr, ref_tr, utt_va, ref_va, utt_te, ref_te,
             tm = _ctc_eval(clf, utt_te, ref_te, device, blank, drop, bs)
             best = {"epoch": ep + 1, "val_per": vm["per_micro"], "val": vm,
                     "test": tm, "train_loss": tr_loss}
+            if extra_tests:
+                best["tests"] = {
+                    nm: _ctc_eval(clf, uf, rf, device, blank, drop, bs)
+                    for nm, (uf, rf) in extra_tests.items()}
             best_state = _cpu_state(clf)            # snapshot best-val weights
         if ep % 5 == 0 or ep == epochs - 1:
             print(f"[probe-ctc e{ep+1}/{epochs}] loss={tr_loss:.3f} lr={lr:.2e} "
@@ -574,20 +655,28 @@ def run(cfg):
             raise SystemExit("[ph-eval] spatial heads (tcn_spatial/attentive) are CE-only")
         print(f"[ph-eval] spatial-aware probe '{ptype}': caching un-pooled token grid")
 
+    # optional extra held-out test splits (e.g. a cross-domain set) evaluated with
+    # the same best-val probe: data.extra_test_splits: [test_lss]
+    extra_names = cfg["data"].get("extra_test_splits", []) or []
+
     encoder = load_frozen_encoder(cfg, device)
     ftr, ltr, mtr = extract(encoder, cfg, "train", device, dtype)
     fva, lva, mva = extract(encoder, cfg, "val", device, dtype)
     fte, lte, mte = extract(encoder, cfg, "test", device, dtype)
+    extra_raw = {nm: extract(encoder, cfg, nm, device, dtype) for nm in extra_names}
     del encoder; torch.cuda.empty_cache()
 
     # reference phoneme sequences + label space (gold or pseudo) from the dataset
     val_ds = build_dataset(cfg, "val")[0]
     test_ds = build_dataset(cfg, "test")[0]
     ref_va, ref_te = val_ds.reference_sequences(), test_ds.reference_sequences()
+    extra_ref = {nm: build_dataset(cfg, nm)[0].reference_sequences() for nm in extra_names}
     num_classes = val_ds.num_classes
     drop = tuple(val_ds.collapse_drop)
     print(f"[ph-eval] tokens train/val/test = {len(ltr)}/{len(lva)}/{len(lte)} "
           f"clips; T'={ltr.shape[1]}; num_classes={num_classes} drop={drop}")
+    for nm in extra_names:
+        print(f"[ph-eval] extra test '{nm}' = {len(extra_raw[nm][1])} clips")
 
     loss_kind = cfg["probe"].get("loss", "ce")
     if loss_kind == "ctc":
@@ -595,21 +684,29 @@ def run(cfg):
         utt_tr = _assemble_utts(ftr, ltr, mtr)
         utt_va = _assemble_utts(fva, lva, mva)
         utt_te = _assemble_utts(fte, lte, mte)
+        extra_tests = {nm: (_assemble_utts(*extra_raw[nm]), extra_ref[nm])
+                       for nm in extra_names}
         print(f"[ph-eval] CTC mode: utts train/val/test = "
               f"{len(utt_tr)}/{len(utt_va)}/{len(utt_te)}; blank={num_classes}")
         best, best_state, history = train_probe_ctc(
             cfg, utt_tr, ref_tr, utt_va, ref_va, utt_te, ref_te,
-            device, num_classes, drop)
+            device, num_classes, drop, extra_tests=extra_tests)
     else:
+        extra_tests = {nm: (extra_raw[nm][0], extra_raw[nm][1], extra_raw[nm][2],
+                            extra_ref[nm]) for nm in extra_names}
         best, best_state, history = train_probe(
             cfg, ftr, ltr, fva, lva, mva, fte, lte, mte,
-            ref_va, ref_te, device, num_classes, drop)
+            ref_va, ref_te, device, num_classes, drop, extra_tests=extra_tests)
     out = {"encoder": cfg["encoder"].get("spec", "pretrained"),
            "kind": cfg["data"].get("kind", "usc_lss"),
            "probe": cfg["probe"].get("type", "tcn"), "loss": loss_kind,
            "spatial_size": cfg["data"]["spatial_size"], "seed": seed,
            "history": history, **best}
     print("\n===== PHONEME RESULT =====")
+    if best.get("tests"):
+        print(f"[ph-eval] primary test: {best.get('test')}")
+        for nm, tm in best["tests"].items():
+            print(f"[ph-eval] extra test '{nm}': {tm}")
     print(json.dumps(out, indent=2))
     stem = os.path.join(meta["out"], f"phoneme_{cfg['data'].get('kind','usc_lss')}_"
                         f"{_tag(cfg,'train')[0]}_{cfg['probe'].get('type','tcn')}_{loss_kind}"
