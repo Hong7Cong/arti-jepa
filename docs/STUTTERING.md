@@ -595,14 +595,52 @@ changing it.
 
 Takeaways: full-grid `attentive` leads; `pooled_attentive` nearly matches it at 256×
 less cache; raw-200f is OOD; the dynamic path is in-distribution but 25 fps trails
-fixed-32f. All single-encoder, single-fps, single-seed — the scale-up below turns this
-into a proper benchmark.
+fixed-32f. All single-encoder, single-fps, single-seed — the scale-up below (§12) turns
+this into a proper **cross-encoder benchmark → `RESULTS_stutter.md`** (6 encoders, done).
+The full-grid `attentive` vs `pooled_attentive` gap here (0.828 vs 0.811) is exactly the
+spatial-detail question §12 phase 2c now tests across encoders + seeds.
 
 ---
 
-## 12. Scale-up plan (draft) — cross-model × fps × probe benchmark
+## 12. Scale-up plan — cross-model × fps × probe benchmark
 
 Turn the single-encoder probe into a systematic, matched-protocol benchmark.
+
+> **Status (2026-07-13).** **Phase 1 (infra) + Phase 2 (encoder sweep) DONE.** The
+> multi-encoder loader is ported into `eval_stutter_binary.py` (encoder-type switch:
+> `vjepa` T-SSL + FAIR-pretrained, `videomae` HF + local rt-MRI repo ckpt,
+> `image_baseline` timm), driven by `scripts/22_stutter_binary_sweep.sh` and aggregated
+> by `artijepa/agg_stutter_binary.py` → **`RESULTS_stutter.md`** (the planned deliverable;
+> named `RESULTS_stutter.md`, not `_binary`). Six-encoder `pooled_attentive`/LOSO/seed-0
+> result (pooled macro-F1): **vjepa_pt 0.822 > tssl256 0.808 ≈ videomae_tssl 0.806 ≈
+> videomae_pt 0.801 ≫ vitl 0.533 / dinov2 0.528**. Headline findings: (i) **video
+> encoders dominate per-frame 2-D image baselines** (~0.80 vs ~0.53, κ≈0.07) — disfluency
+> is a temporal signal; (ii) **FAIR-pretrained V-JEPA2 beats the rt-MRI fine-tune**.
+> tssl256 0.808 reproduces §11's published 0.811.
+>
+> **3-seed CIs DONE (2026-07-13, `scripts/run_3seed_pooled.sh`).** vjepa_pt
+> **0.812 ± 0.007** vs tssl256 **0.785 ± 0.017** (pooled macro-F1, seeds 0/1/2) — **Δ
+> +0.027, vjepa_pt wins all three seeds and is ~2.4× more stable**, so the
+> pretrained>fine-tune result is *robust and larger than seed-0 implied*. Per-speaker,
+> the seed-0 "tssl wins PWS3/6/7 (via fluent recall)" story **does not survive**: PWS3
+> (±0.050) and PWS6 flip to vjepa on the 3-seed mean (tssl won only at seed 0); only the
+> tiny/noisy PWS7 fold stays a marginal tssl win (+0.019, not unanimous). The *robust*
+> signal is vjepa_pt winning the **hard** speakers PWS4 (Δ−0.072) and PWS8 (Δ−0.076)
+> **every seed** with tight CIs. The rt-MRI fine-tune also raised probe-seed variance
+> (±0.017 vs ±0.007) — a less stable frozen representation. Full CI tables in
+> `RESULTS_stutter.md`.
+>
+> **DONE 2026-07-15 (SLURM).** **Full-grid `attentive` @ 32f** (no spatial pooling), both
+> encoders, 3 seeds (`scripts/23_stutter_binary_attentive.sbatch`) — **hypothesis
+> CONFIRMED, with a twist.** tssl256 **0.817 ± 0.009** vs its pooled 0.785 (**+0.032**);
+> vjepa_pt **0.789 ± 0.010** vs its pooled 0.812 (**−0.023**). A clean **dissociation**:
+> keeping the spatial grid helps the rt-MRI fine-tuned encoder but hurts the pretrained
+> one, and the **ranking flips** (pooled: vjepa > tssl; full-grid: tssl > vjepa). rt-MRI
+> fine-tuning restructures the per-frame spatial tokens to carry articulatory-dynamics
+> signal that mean-pooling destroys — but only a spatially-aware probe reads it out. Full
+> tables in `RESULTS_stutter.md`. (Ran one job per seed from the isolated worktree
+> `/scratch1/hongn/artijepa/wt_stutter_sweep`, branch `stutter-binary-sweep`, after the
+> 3-seeds-serial packing overran the 8h wall — single-seed cache-hit jobs run ~25 min.)
 
 **Held constant.** LOSO over 7 PWS · duration-matched fluent negatives (`seed 0`) ·
 balanced CE · macro-F1 primary (+bal-acc, acc) · pooled-spatial cache to keep RAM
@@ -610,14 +648,19 @@ small · 3 seeds for the final headline cells.
 
 **Axis A — Encoders (each at its native geometry/norm).**
 
-| key | type | geom / norm | status |
-|---|---|---|---|
-| `tssl_vjepa` (combined ckpt_100) | vjepa | 256/32f · zscore | ✓ done |
-| `vjepa_pretrained` | vjepa | 256/32f · zscore | infra ready |
-| `videomae_pretrained` | videomae | 224/16f · minmax | port loader |
-| `videomae_tssl` (rtMRI fine-tune) | videomae | 224/16f · minmax | needs ckpt |
-| `google_vitl` | image_baseline `vitl` | per-frame · minmax | port loader |
-| `dino_vitl` | image_baseline `dinov2/3` | per-frame · minmax | port loader |
+| key | type | geom / norm | pooled_attn macro-F1 (s0) | status |
+|---|---|---|---|---|
+| `tssl256` (combined ckpt_100) | vjepa | 256/32f · zscore | 0.808 | ✓ done |
+| `vjepa_pt` (FAIR pretrained) | vjepa | 256/32f · zscore | **0.822** | ✓ done |
+| `videomae_pt` (Kinetics SSL) | videomae | 224/16f · minmax | 0.801 | ✓ done |
+| `videomae_tssl` (rtMRI ckpt-214) | videomae | 224/16f · minmax | 0.806 | ✓ done |
+| `vitl` (supervised, per-frame) | image_baseline `vitl` | per-frame · minmax | 0.533 | ✓ done |
+| `dinov2` (per-frame) | image_baseline `dinov2` | per-frame · minmax | 0.528 | ✓ done |
+
+Encoder id → checkpoint: `vjepa_pt` = `/scratch1/hongn/artijepa/checkpoints/vitl.pt`
+(key `target_encoder`, `module.backbone.*` → `clean_backbone_key`); `videomae_tssl` =
+`/scratch1/hongn/videomae_ct/runs/vitl_rtmri_combined_ct/checkpoint-214.pth` (repo→HF).
+timm image baselines are cached under `$HF_HOME` (offline-ready).
 
 **Axis B — Temporal sampling.** fixed {32f, 100f}; dynamic {native, 25, 50, 100 fps}.
 (Image baselines are per-frame → the fps sets the frame rate feeding a temporal head;
@@ -630,22 +673,33 @@ VideoMAE is fixed 16f internally.)
 VRAM · #probe params · tokens/clip — all already logged; aggregate into one table.
 
 **Phasing.**
-1. **Infra** — port `eval_disfluency`'s multi-encoder loader (`videomae`,
-   `image_baseline`) into `eval_stutter_binary[_dynamic]` (encoder-type switch +
-   per-encoder geometry/norm); add a sweep runner and a JSON→markdown aggregator.
-2. **Encoder sweep** at the canonical setting (`pooled_attentive`, 32f-equiv) → the
-   cross-model table.
+1. ✓ **Infra DONE** — multi-encoder loader ported into `eval_stutter_binary.py`
+   (encoder-type switch + per-encoder geometry/norm), `scripts/22_stutter_binary_sweep.sh`
+   runner, `artijepa/agg_stutter_binary.py` aggregator. (`_dynamic` not yet ported.)
+2. ✓ **Encoder sweep DONE** at `pooled_attentive`/32f-equiv/seed-0 → cross-model table
+   in `RESULTS_stutter.md` (see Status box above).
+2b. ✓ **3-seed CIs DONE** (tssl256, vjepa_pt @ pooled_attentive) — `scripts/run_3seed_pooled.sh`;
+   CIs in `RESULTS_stutter.md`. vjepa_pt 0.812±0.007 > tssl256 0.785±0.017 (robust, all seeds).
+2c. ✓ **Full-grid `attentive` @ 32f DONE** (tssl256, vjepa_pt, 3 seeds) — the
+   **spatial-detail test**: keep the [T′·S′,D] grid (no S′ pooling) so an
+   AttentivePooler attends over space+time jointly. **Result: dissociation.** tssl256
+   0.817±0.009 (**+0.032** over pooled) but vjepa_pt 0.789±0.010 (**−0.023**); the
+   encoder ranking flips (pooled: vjepa>tssl; grid: tssl>vjepa). rt-MRI fine-tuning's
+   gain lives in the spatial tokens that mean-pooling destroys. CIs + per-speaker in
+   `RESULTS_stutter.md`. `scripts/23_stutter_binary_attentive.sbatch` (~31 GiB
+   cache/encoder → SLURM; `SEEDS` env runs one seed/job to fit the 8h wall).
 3. **FPS sweep** (dynamic, best encoder) {native, 25, 50, 100} → macro-F1-vs-rate curve.
 4. **Probe sweep** (best encoder × best temporal) → probe table.
 5. **Compute report** (Axis D) + an accuracy-vs-compute Pareto plot.
-6. **3-seed** re-run of the headline cells for CIs.
+6. **3-seed** re-run of the remaining headline cells for CIs.
 
-**Cost.** Extraction dominates (~6 encoders × ~4 temporal settings ≈ 24 extractions,
-~10–50 min each); probes are cache-hit cheap. Pooled-spatial keeps every cache < 1 GB.
+**Cost.** Extraction dominates; the seed-0 sweep was 6 encoders × ~3–66 min each
+(DINOv2 @518px is the outlier). Pooled-spatial keeps every cache 61–122 MB; the
+full-grid `attentive` path is ~31 GiB/encoder (hence SLURM for 2c).
 
-**Deliverables.** an auto-aggregated `RESULTS_stutter_binary.md`; plots (macro-F1 vs
-fps per encoder; accuracy-vs-compute Pareto). **Open infra gap:** the binary evals
-currently load only the vjepa/tssl encoder — phase 1 is the prerequisite for A.
+**Deliverables.** the auto-aggregated **`RESULTS_stutter.md`** (done); still to add:
+per-fold CIs, the full-grid-vs-pooled spatial-detail comparison, and plots (macro-F1 vs
+fps per encoder; accuracy-vs-compute Pareto). **Infra gap CLOSED** (phase 1).
 
 ---
 
