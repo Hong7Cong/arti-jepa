@@ -1,0 +1,83 @@
+# =============================================================================
+# Phoneme-GROUPS eval (Phase 3)  --  clip-level phoneme classification
+# =============================================================================
+# One sample = ONE phoneme, cut from the video by its start-end alignment and
+# classified with a SINGLE label (clip-level), at four granularities:
+#   vowels(15) | consonants(25) | manner(5, consonants) | place(8, consonants)
+# Head = attentive_lstm in CLIP mode: AttentivePooler over S' per temporal step ->
+# bi-LSTM over the phoneme's variable-length token sequence -> LAST hidden state
+# (the single phoneme vector) -> linear -> class logits.  Metrics: macro/weighted
+# F1 / precision / recall + per-class + confusion matrix.  See RESULTS_phonepred.md
+# "Phase 3" and artijepa/eval_phoneme_groups.py.
+#
+# Same combined Annot-16 + usc_lss manifest as Phase 1-2: train on 14 Annot-16
+# speakers, model-select on val (sub030), report test (in-domain sub043) AND
+# test_lss (cross-domain usc_s1).  The frozen-feature cache is TASK-AGNOSTIC (all
+# non-sil phonemes, one clip each) -> extracted ONCE per encoder x split and shared
+# by all four tasks.
+#
+# RUN (one job per encoder; --tag names the cache + output):
+#   cd /project2/shrikann_35/hongn/vjepa2
+#   PYTHONPATH=.:dev_artiJEPA python -m artijepa.eval_phoneme_groups \
+#       --config dev_artiJEPA/configs/eval_phoneme_groups.yaml \
+#       --encoder /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_215.pt \
+#       --tag tssl256comb215 --seed 0
+#   # stock V-JEPA2:     (no --encoder) --tag pretrained
+#   # VideoMAE (K400):   --model videomae --tag videomae
+#   # rt-MRI VideoMAE:   set encoder.type/checkpoint below OR use eval config, --tag videomae_rtmri
+# -----------------------------------------------------------------------------
+
+meta:
+  out: /scratch1/hongn/artijepa/eval/phgroups
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/phgroups
+  seed: 0
+  dtype: float16          # !! V100 has NO bf16 -> float16 (or pass --dtype)
+  tag: null                # null -> derived from encoder.spec; set to label cache+outputs
+  save_probe: true         # write best-val probe weights per task ->
+                           #   phgroups_<tag>_s<seed>_<task>.pt  (reload: load_probe())
+                           # false = metrics JSON only
+
+# ENCODER -- pick ONE family (frozen; see configs/eval_phoneme_annot16_combined.yaml).
+#   A) V-JEPA ViT: spec=pretrained | a ckpt path (via --encoder), model_name=vit_large
+#   B) VideoMAE : type=videomae, model=MCG-NJU/videomae-large (+ checkpoint for rt-MRI)
+encoder:
+  spec: pretrained
+  model_name: vit_large
+  checkpoint: null
+  key: auto
+
+# PROBE -- attentive_lstm CLIP head (last LSTM hidden = phoneme vector).
+probe:
+  epochs: 40
+  warmup: 4
+  lr: 1.0e-3
+  wd: 0.01
+  hidden: 512
+  layers: 2
+  heads: 8
+  dropout: 0.1
+  batch_size: 128          # clip-classification: many short clips per batch
+  workers: 6
+  tasks: null              # null -> all of [vowels, consonants, manner, place]; or a subset
+  # RAM-preload budget for the SMALL, re-read splits (val every epoch; test/test_lss once).
+  # TRAIN deliberately stays on the memmap + workers -- preloading it (40-60 GB) forces
+  # num_workers=0 to avoid a fork/OOM and ends up SLOWER than the I/O it saves.
+  preload_gb: 20.0
+
+# DATA -- geometry matches Phase 1-2 (V-JEPA 256px/32f; VideoMAE forces 224px/16f).
+# Each phoneme is sampled at ~target_fps within [start,end] (>=1 token, <= one
+# frames_per_clip window) then edge-padded to frames_per_clip for the encoder; the
+# pad temporal tokens are DROPPED before the LSTM (variable-length sequence).
+data:
+  manifest: /scratch1/hongn/annot16_phonemes/phoneme_manifest_combined.csv
+  extra_test_splits: [test_lss]
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32      # V-JEPA window (VideoMAE overrides to 16); 32f @ 50fps = 0.64 s
+  target_fps: 50.0         # FPS = 50 (Phase 3 spec)
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  batch_size: 32           # extraction batch (clips are short)
+  num_workers: 6
