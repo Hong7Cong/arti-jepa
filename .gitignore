@@ -22,7 +22,7 @@ outputs/
 checkpoints/
 runs/
 wandb/
-
+docs/
 # Env / OS
 .env
 .DS_Store

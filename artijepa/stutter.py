@@ -227,12 +227,16 @@ def label_space(task):
 
     ``type5``  : block/rep/pro/osci/other        (bucket5)
     ``type3``  : block/rep/pro                    (bucket5, rare dropped)
+    ``type4``  : block/rep/pro/fluent             (type3 + the fluent negatives, so a
+                 single head does detection *and* typing; needs fluent rows)
     ``binary`` : fluent/disfluent                 (derived; needs fluent rows)
     """
     if task == "type5":
         return ["block", "rep", "pro", "osci", "other"], "bucket5"
     if task == "type3":
         return ["block", "rep", "pro"], "bucket5"
+    if task == "type4":
+        return ["block", "rep", "pro", FLUENT], "bucket5"
     if task == "binary":
         return ["fluent", "disfluent"], "bucket5"
     raise ValueError(f"unknown disfluency task {task!r}")
@@ -243,7 +247,9 @@ def row_label(row, task, classes):
     if task == "binary":
         return 0 if row["bucket5"] == FLUENT else 1
     val = row["bucket5"]
-    if val == FLUENT or val not in classes:      # fluent negs unused for type tasks
+    # ``type4`` keeps the fluent negatives as their own class; every other type task
+    # drops them (and drops the rare buckets not present in ``classes``).
+    if val not in classes:
         return None
     return classes.index(val)
 

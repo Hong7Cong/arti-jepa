@@ -196,7 +196,7 @@ normalized matrices in `…/eval/confmat/confmat_values_test_lss_s0.json`. **t-S
 
 ---
 
-## Phoneme-CLIP classification (Phase 3) — vowels · consonants · manner · place
+## Phoneme-CLIP classification (Phase 3) — vowel-vs-consonant · vowels · consonants · manner · place
 
 **A different task from everything above.** Phases 1–2 slide a window over the utterance and
 label every temporal token (frame-level sequence task → κ / PER). Phase 3 cuts **one whole
@@ -213,18 +213,33 @@ directions) is the phoneme vector → linear. Same combined Annot-16 + usc_lss m
 splits (train = 14 Annot-16 speakers, val = sub030, `test` = sub043 in-domain, `test_lss` =
 usc_s1 cross-domain), 256px / 32f / target_fps 50, frozen encoder, **seed 0 only**. The feature
 cache is task-agnostic (all non-sil phonemes, one clip each) — extracted once per encoder × split,
-then the four tasks are derived by filtering + relabeling.
+then the tasks are derived by filtering + relabeling.
+
+**Task ladder, coarse → fine.** `vowcons` (2c) is the floor and the only task spanning *both*
+families — every non-sil phoneme, relabelled Vowel(+Diphthong) vs Consonant. It asks whether the
+frozen features carry the open-vs-constricted vocal-tract distinction *at all*, before the four
+identity/subclass tasks ask *which* phoneme. Being binary it also reports **ROC-AUC / average
+precision / positive-class F1** (Consonant = positive) next to the macro numbers the multiclass
+tasks report. Same cache, same head, same splits as the other four — it is a pure relabel, so it
+costs one extra probe training per encoder and **no re-extraction**.
 
 ### macro-F1 by task (val / test / test_lss)
 
-| encoder | vowels (15c) | consonants (25c) | manner (5c) | place (8c) |
-|---|---|---|---|---|
-| **tssl256comb215** | **0.561 / 0.568 / 0.516** | **0.374 / 0.399 / 0.329** | **0.521 / 0.571 / 0.537** | **0.607 / 0.593 / 0.507** |
-| **videomae_rtmri** (ckpt-214) | 0.414 / 0.471 / 0.428 | 0.315 / 0.371 / 0.287 | 0.489 / 0.510 / 0.453 | 0.491 / 0.526 / 0.471 |
-| videomae (Kinetics) | 0.409 / 0.472 / 0.282 | 0.261 / 0.291 / 0.167 | 0.404 / 0.491 / 0.322 | 0.421 / 0.441 / 0.285 |
-| pretrained (FAIR V-JEPA2) | 0.363 / 0.445 / 0.301 | 0.230 / 0.291 / 0.140 | 0.367 / 0.485 / 0.324 | 0.349 / 0.436 / 0.263 |
+| encoder | vowcons (2c) | vowels (15c) | consonants (25c) | manner (5c) | place (8c) |
+|---|---|---|---|---|---|
+| **tssl256comb215** | _not run_ | **0.561 / 0.568 / 0.516** | **0.374 / 0.399 / 0.329** | **0.521 / 0.571 / 0.537** | **0.607 / 0.593 / 0.507** |
+| **videomae_rtmri** (ckpt-214) | _not run_ | 0.414 / 0.471 / 0.428 | 0.315 / 0.371 / 0.287 | 0.489 / 0.510 / 0.453 | 0.491 / 0.526 / 0.471 |
+| videomae (Kinetics) | _not run_ | 0.409 / 0.472 / 0.282 | 0.261 / 0.291 / 0.167 | 0.404 / 0.491 / 0.322 | 0.421 / 0.441 / 0.285 |
+| pretrained (FAIR V-JEPA2) | _not run_ | 0.363 / 0.445 / 0.301 | 0.230 / 0.291 / 0.140 | 0.367 / 0.485 / 0.324 | 0.349 / 0.436 / 0.263 |
 
-`test_lss` support: vowels n=9,716 · consonants/manner/place n=15,103.
+`test_lss` support: vowels n=9,716 · consonants/manner/place n=15,103 · **vowcons n=24,819**
+(9,716 Vowel : 15,103 Consonant → a 60.9% majority-class baseline, macro-F1 0.378 if everything is
+called Consonant; that is the number the 2-class column must beat).
+
+⚠️ **`vowcons` is implemented but not yet run** (added 2026-08-07). The task, the binary metrics
+and the launcher path are in place; the four cells above need one cached-feature job per encoder
+(~3–4 h each, no re-extraction) — see *Reproduce* step 2b below. Nothing else in this section
+changes: the 16 multiclass cells are untouched.
 
 **The Phase-1 ranking reproduces on a completely different task formulation.** Both rt-MRI-adapted
 encoders beat both stock ones at **every** granularity on all three splits — the matrix is now
@@ -285,16 +300,25 @@ and the predicted:true Nasal count ratio is tssl ×1.73, pretrained ×2.07, vide
 videomae_rtmri ×0.79. So pretrained's 0.752 Nasal recall is **not** a rival to tssl's 0.899 — it
 comes with precision 0.36 against tssl's 0.52._
 
-| place | tssl256comb215 | videomae_rtmri | videomae | support |
-|---|---|---|---|---|
-| Bilabial | 0.607 | 0.679 | **0.852** | 1,811 |
-| Labiodental | **0.661** | 0.456 | 0.356 | 873 |
-| Dental | 0.614 | **0.621** | 0.433 | 817 |
-| Alveolar | **0.625** | 0.572 | 0.345 | 8,451 |
-| Postalveolar | **0.592** | 0.485 | 0.014 | 586 |
-| Palatal | 0.304 | **0.492** | 0.228 | 250 |
-| Velar | 0.472 | **0.527** | 0.285 | 1,969 |
-| Glottal | 0.309 | 0.373 | **0.471** | 346 |
+| place | tssl256comb215 | videomae_rtmri | videomae | pretrained | support |
+|---|---|---|---|---|---|
+| Bilabial | 0.607 | 0.679 | **0.852** | 0.606 | 1,811 |
+| Labiodental | **0.661** | 0.456 | 0.356 | 0.189 | 873 |
+| Dental | 0.614 | **0.621** | 0.433 | 0.616 | 817 |
+| Alveolar | **0.625** | 0.572 | 0.345 | 0.409 | 8,451 |
+| Postalveolar | **0.592** | 0.485 | 0.014 | 0.002 | 586 |
+| Palatal | 0.304 | **0.492** | 0.228 | 0.192 | 250 |
+| Velar | 0.472 | **0.527** | 0.285 | 0.236 | 1,969 |
+| Glottal | 0.309 | 0.373 | 0.471 | _0.642_ | 346 |
+
+_Recall again, and the same over-emission caveat as the manner table — two rows are inflated for the
+stock encoders, so the bolded max is not the "best" encoder. **Glottal**: the high stock recalls
+(videomae 0.471, pretrained _0.642_, italicised not bolded because it is degenerate) are dump-target
+artifacts — pretrained predicts Glottal **6.67× more often than it occurs** (2,309 preds vs 346 true,
+precision **0.096**), videomae 2.08× (0.227), while the adapted encoders are calibrated (tssl 0.48×,
+precision 0.641; videomae_rtmri 0.82×). **Postalveolar** collapses the other way — recall 0.014 /
+0.002 for the two stock encoders, i.e. they essentially never emit it. So on both rows the adapted
+encoders' more modest numbers reflect calibration, not weakness._
 
 ### What the confusions say
 
@@ -327,53 +351,102 @@ comes with precision 0.36 against tssl's 0.52._
   `ah` (`ow→ah`, `uh→ah`, `aa→ah`), and the effect scales inversely with adaptation: 0.30 for
   tssl vs 0.61 for videomae_rtmri on `ow→ah`. Stock videomae instead confuses `uw→iy` (0.68) —
   a front/back error, i.e. it is not resolving tongue *position* at all.
-- **Glottal `{h,hh}` stays near-chance for the adapted encoders** (0.309 / 0.373), leaking to
-  Alveolar (0.34). Expected: glottal constriction is largely invisible in the mid-sagittal
-  field of view.
+- **Glottal `{h,hh}` is the lowest-*recall* place class for the adapted encoders** (0.309 / 0.373 —
+  the lowest of videomae_rtmri's 8, second-lowest of tssl's), leaking to Alveolar (0.34), as
+  expected since glottal constriction is largely invisible in the mid-sagittal FOV. But "lowest
+  recall" ≠ "worst" here: those low recalls come with *high precision* (tssl 0.641), whereas the
+  higher stock recalls (videomae 0.471, pretrained 0.642) are the dump-target over-emission
+  documented under the table — pretrained fires Glottal 6.67× too often at precision 0.096. And it
+  is still well *above* chance regardless — uniform-random over 8 classes is 0.125, Glottal's prior
+  (346/15,103) is 0.023 — so the earlier "near-chance" was wrong on two counts: not near chance, and
+  not even the adapted encoders' failure.
 
-### Figures — confusion + t-SNE, `tssl256comb215` on `test_lss` (2026-07-23)
+### Figures — confusion + t-SNE, all four encoders on `test_lss` (2026-07-23)
 
-`artijepa/plot_phgroups.py` reloads the four saved probes and re-runs them over the cached
-`test_lss` features (no re-extraction). Outputs in `…/eval/phgroups/figs/`:
+`artijepa/plot_phgroups.py` reloads the saved probes and re-runs them over the cached `test_lss`
+features (no re-extraction). Rendered for **all four encoders** — 3 figures each, in
+`…/eval/phgroups/figs/`:
 
-| file | contents |
+| file (per `<tag>`) | contents |
 |---|---|
-| `phgroups_confmat_tssl256comb215_test_lss_s0.png` | 4 panels, rows=true / cols=predicted, row-normalized to recall |
-| `phgroups_tsneA_…png` | t-SNE of **rep A** = the phoneme vector (bi-LSTM last hidden) |
-| `phgroups_tsneB_…png` | t-SNE of **rep B** = raw encoder tokens mean-pooled, no probe |
-| `phgroups_confmat_…json` | the plotted matrices + re-scored macro-F1 |
+| `phgroups_confmat_<tag>_test_lss_s0.png` | 4 task panels, rows=true / cols=predicted, row-normalized to recall |
+| `phgroups_tsneA_<tag>_test_lss_s0.png` | t-SNE of **rep A** = the phoneme vector (bi-LSTM last hidden) |
+| `phgroups_tsneB_<tag>_test_lss_s0.png` | t-SNE of **rep B** = raw encoder tokens mean-pooled, no probe |
+| `phgroups_confmat_<tag>_test_lss_s0.json` | the plotted matrices + re-scored macro-F1 |
 
-**Sanity check:** re-running the probes reproduces the stored eval macro-F1 to 4 dp on all three
-unmodified tasks (vowels 0.5162, consonants 0.3290, manner 0.5374) — the reload path is faithful.
+`<tag>` ∈ {`tssl256comb215`, `videomae_rtmri`, `videomae`, `pretrained`}.
+
+**Sanity check — the reload is faithful.** Re-running the probes reproduces the stored eval
+macro-F1 essentially exactly: most cells match to 4 dp (e.g. videomae vowels 0.2817 / consonants
+0.1674 / manner 0.3217; videomae_rtmri manner 0.4533), and the rest drift by **≤2e-4** (videomae_rtmri
+vowels 0.4282 vs 0.4284; pretrained vowels 0.3006 vs 0.3008). The drift is `plot_phgroups.py`'s
+default `--batch-size 64` vs the eval config's 128: under fp16 the accumulation order shifts and a
+couple of borderline clips flip. Not a correctness issue — but "reproduces to 4 dp" would be too
+strong, hence ≤2e-4.
 
 **`place` here is 7-class (Glottal dropped)**, per request: Glottal-true clips are excluded *and*
 the Glottal logit is masked so predictions re-argmax over the 7 survivors, giving a matrix whose
-rows sum to support. Re-scored **macro-F1 0.524** vs **0.507** for the 8-class version in the JSON
-above — the two numbers are not interchangeable. Note the gain is almost entirely from deleting a
-weak row from the macro average, not from redistributed mass: every surviving class moves by ≤1
-point (Alveolar 62→63, Palatal 30→31, rest unchanged), because Glottal was seldom *predicted* even
-when available.
+rows sum to support. The re-scored number is **not** interchangeable with the 8-class value in the
+tables above, and the lift from dropping Glottal orders **inversely with how well each encoder did
+on Glottal** — the better it scored there, the more it loses by removing it:
 
-**Rep A tracks the confusion matrix.** Nasal and Approximant occupy their own territories while
-Plosive and Fricative interpenetrate — the same structure as the 37/20 and 9/64 cells.
+| encoder | place 8c | place 7c | lift | Glottal recall (8c) |
+|---|---|---|---|---|
+| tssl256comb215 | 0.507 | **0.524** | +0.017 | 0.31 |
+| videomae_rtmri | 0.471 | 0.484 | +0.013 | 0.37 |
+| videomae | 0.285 | 0.293 | +0.008 | 0.47 |
+| pretrained | 0.263 | **0.299** | +0.036 | (dump target) |
 
-⚠️ **Rep B shows no phoneme-class structure at any granularity** — all four panels are colour-mixed,
-and the clean Affricate cluster visible in rep A is absent. Two readings, not yet separated:
+For tssl the gain is almost pure bookkeeping — deleting a weak row from the macro average, every
+surviving class moving ≤1 point (Alveolar 62→63, Palatal 30→31). `pretrained` gains most because
+Glottal was a *dump target* absorbing its cross-class misfires, so removing it also cleans the
+survivors.
 
-1. The clip-level geometry really is dominated by something other than phoneme identity (rep B
-   does split into two large blobs, but the split is **not** phoneme-aligned; cause unidentified —
-   session/appearance are the obvious suspects for a single-speaker split like usc_s1).
-2. **The pooling is blunter than Phase-1's rep B and may be doing the damage.** Phase-1
-   `tsne_phonemes.py` rep B pools over S′ only, keeping one vector *per temporal token*; this rep B
-   additionally averages over the clip's temporal tokens to get one vector per phoneme, which
-   discards exactly the within-phoneme dynamics (release bursts, formant transitions) that
-   distinguish e.g. affricates from plosives. So this is a harsher test than the Phase-1 panels.
+**The headline the confusion matrices add: stock encoders COLLAPSE onto per-task attractor
+classes; adapted ones do not.** This is one behaviour, visible in every label space, not the
+place-specific quirk the per-class tables above described:
 
-Consequently: **do not read rep B as evidence that the frozen encoder lacks phoneme geometry**, and
-do not conclude from rep A that affricate collapse is "merely" a classifier-prior problem — rep A
-is the trained decision space and its affricate cluster may be probe-constructed. Resolving this
-needs a rep-B variant that keeps the temporal axis (per-token, as in Phase 1) before the two
-readings can be told apart. **Not run.**
+- **`videomae` — one attractor per task.** place→**Bilabial** (recall 86, fed by Labiodental→Bil
+  47, Palatal→Bil 41, Alveolar→Bil 31; Postalveolar recall **1**); manner→**Fricative** (65, with
+  Plosive/Approximant/Affricate/Nasal all leaking in 32–46; Affricate recall **1**); vowels→**`iy`**
+  (86, `uw→iy` 68). Pick one class, dump everything into it, score ~0 on the class furthest away.
+- **`pretrained` — two attractors.** manner→**Fricative + Nasal** (Nasal column fed by every other
+  manner 19–31 → the over-emission behind its inflated 0.75 Nasal *recall*, precision 0.36);
+  place→**Bilabial + Dental** (Alveolar/Palatal→Dental 32 each; Postalveolar recall **0**);
+  vowels→**`ih`/`iy`**. Affricate column essentially empty (1 predicted of 358).
+- **`tssl256comb215` / `videomae_rtmri` — no collapse.** Errors flow toward the *majority* class
+  (Alveolar, n=8,451) — an ordinary prior, not a degenerate sink — and every class keeps non-trivial
+  recall. `videomae_rtmri`'s place diagonal is the most *balanced* of the four (68/46/63/58/48/49/53)
+  even though its macro-F1 (0.484) trails tssl's (0.524): different failure profiles, not just
+  different magnitudes.
+
+A per-class **recall** table alone would have scored `videomae`'s Bilabial 0.85 and `pretrained`'s
+Nasal 0.75 as strengths; the matrices show both are collapse artifacts. This is why the per-class
+section above is stated in F1, and the manner claim was corrected from recall to F1.
+
+**Rep A tracks the confusion matrix** for every encoder — Nasal/Approximant hold their own
+territories, Plosive/Fricative interpenetrate, and the stock encoders' attractor classes show up as
+one dominant blob swallowing the rest.
+
+⚠️ **Rep B (non-circular) is weak but NOT uniformly empty — and this claim was narrowed after
+seeing all four.** For `tssl256comb215` rep B shows little phoneme structure (it splits into two
+large blobs, but the split is not phoneme-aligned — session/appearance are the suspects on a
+single-speaker split like usc_s1). For `videomae_rtmri` it is *not* empty: at least one island is
+class-coherent (a Dental cluster in `place` coinciding with a Fricative concentration in `manner`,
+i.e. {th,dh}). So "rep B shows no phoneme geometry" was a tssl-specific observation, not a general
+one. Two confounds remain unseparated:
+
+1. Whether the clip-level geometry is genuinely dominated by non-phoneme factors, or
+2. **the pooling is blunter than Phase-1's rep B.** Phase-1 `tsne_phonemes.py` rep B pools over S′
+   only (one vector *per temporal token*); this rep B additionally averages over the clip's temporal
+   tokens, discarding the within-phoneme dynamics (release bursts, formant transitions) that
+   separate e.g. affricates from plosives. So this is a strictly harsher test than the Phase-1 panels.
+
+Consequently: **do not read rep B as evidence the frozen encoder lacks phoneme geometry**, and do
+not conclude from rep A that affricate collapse is "merely" a classifier-prior problem — rep A is
+the trained decision space and its clusters may be probe-constructed. A **kNN probe in rep-B space**
+(train on the rep-B vectors, measure class accuracy — the vectors are already computed in the
+forward pass) would quantify this properly, as would a per-token rep-B variant. **Neither run.**
 
 ### Reproduce
 
@@ -382,7 +455,8 @@ cd /project2/shrikann_35/hongn/vjepa2
 source dev_artiJEPA/scripts/_env.sh        # conda env artijepa; sets PYTHONPATH
 ```
 
-**1 — the 4 encoder runs (all 4 tasks each).** One job per encoder, ~24 h wall, GPU v100, 96 GB:
+**1 — the 4 encoder runs (all tasks each).** One job per encoder, ~32 h wall, GPU v100, 96 GB
+(the launcher default was raised 24 → 32 h when `vowcons` made it 5 tasks):
 
 ```bash
 S=dev_artiJEPA/scripts/28_phoneme_groups.sbatch
@@ -392,7 +466,7 @@ for ENC in tssl256comb215 pretrained videomae videomae_rtmri; do sbatch $S $ENC 
 ```
 
 Each job extracts a **task-agnostic** ragged clip cache once per split (~4.6 h at 256px), then
-trains the 4 tasks off it (~1.5–5 h each, 40 epochs, model-selected on val macro-F1). Caches
+trains the 5 tasks off it (~1.5–5 h each, 40 epochs, model-selected on val macro-F1). Caches
 (`~141 GB` per encoder, all 4 splits) live in `/scratch1/hongn/artijepa/feat_cache/phgroups/<tag>phg_<hash>/`
 and are **keyed on spec/size/fps/manifest, NOT the ckpt epoch** — reusing a tag across
 checkpoints silently cache-hits stale features, which is why ckpt_215 got its own
@@ -403,8 +477,10 @@ checkpoints silently cache-hits stale features, which is why ckpt_215 got its ow
 
 `28_phoneme_groups.sbatch` takes an optional **4th positional arg = comma-separated task subset**
 (added 2026-07-23). Pass `""` for the debug-limit slot to reach it. `pretrained` needs no
-`--encoder`/`--model` flag. **Back up first** — a subset run rewrites the JSON with only those
-tasks:
+`--encoder`/`--model` flag. A subset run now **merges** into the existing
+`phgroups_<tag>_s<seed>.json` (named tasks recomputed, the rest carried over — changed
+2026-08-07 alongside the `vowcons` task); the `.bak` below is belt-and-braces, no longer the
+load-bearing step it was for the `place` back-fill:
 
 ```bash
 cp /scratch1/hongn/artijepa/eval/phgroups/phgroups_pretrained_s0.json{,.bak}
@@ -416,7 +492,8 @@ sbatch --time=8:00:00 dev_artiJEPA/scripts/28_phoneme_groups.sbatch pretrained 0
 # 4 splits in the first minute -- if it starts extracting instead, the tag/hash is
 # wrong and it will burn ~5 h rebuilding a cache that already exists.
 
-# the run leaves a JSON containing ONLY place -- merge it back:
+# the job prints "[phg] merging into existing JSON; keeping [...]" -- if that line is
+# ABSENT the file was not found (wrong tag/seed) and you get a single-task JSON; then:
 python - <<'PY'
 import json
 p='/scratch1/hongn/artijepa/eval/phgroups/phgroups_pretrained_s0.json'
@@ -426,6 +503,29 @@ json.dump(old, open(p,'w'), indent=2)
 print('tasks now:', list(old['tasks']))
 PY
 ```
+
+**2b — the binary `vowcons` task** (added 2026-08-07, **not yet run**). Same subset mechanism, so
+the four encoders' finished JSONs are extended in place rather than rebuilt. Every split cache-hits
+— `vowcons` reads the *same* task-agnostic clip cache, it is only a relabel — so this is training
+only (~3–4 h/encoder; it sees vowels **and** consonants, i.e. ~1.6× the clips of the `consonants`
+task, but 2 classes converge fast):
+
+```bash
+S=dev_artiJEPA/scripts/28_phoneme_groups.sbatch
+for ENC in tssl256comb215 pretrained videomae videomae_rtmri; do
+    cp /scratch1/hongn/artijepa/eval/phgroups/phgroups_${ENC}_s0.json{,.bak}
+    sbatch --time=8:00:00 $S $ENC 0 "" vowcons
+done
+# same cache-hit check as above.  Each job appends tasks.vowcons to its JSON and
+# writes phgroups_<tag>_s0_vowcons.pt; the 4 multiclass tasks are carried over
+# untouched (look for "[phg] merging into existing JSON; keeping [...]").
+```
+
+`tasks.vowcons.<split>` carries the usual macro/weighted P/R/F1 + κ + 2×2 confusion matrix **plus**
+`roc_auc`, `average_precision` and `f1_binary` (Consonant = class 1 = positive). Read it against
+the 0.378 all-Consonant macro-F1 floor, not against 0.5. Figures are opt-in:
+`python -m artijepa.plot_phgroups --tag <tag> --tasks vowcons …` (the default `--tasks` stays at the
+four multiclass ones, so the existing figure runs are unaffected).
 
 **3 — the figures** (`confmat` + t-SNE rep A/B). Reloads the saved `_<task>.pt` probes and re-runs
 them over the cached split; **no re-extraction**, so this is GPU-light (~45 min for 4 tasks on a
@@ -531,6 +631,19 @@ phased runs) now lives in **`docs/phonePred.md §5`**. Headline next steps:
   encoders → `…/eval/phgroups/figs/phgroups_{confmat,tsneA,tsneB}_<tag>_test_lss_s0.png`. Results
   tables and figure discussion are in the *Phoneme-CLIP classification (Phase 3)* section above.
   **Phase 3a complete.**
+
+- [ ] **Phase 3b — binary vowel-vs-consonant** (implemented 2026-08-07, **runs pending**): the
+  coarsest rung of the same clip-classification ladder — one probe over **all** non-sil phonemes
+  relabelled Vowel(+Diphthong) vs Consonant, so it is the only Phase-3 task that mixes the two
+  families. Implemented as task `vowcons` in `artijepa/eval_phoneme_groups.py::build_tasks`; being
+  2-class it additionally reports **ROC-AUC / average precision / positive-class F1** (Consonant =
+  positive) beside the macro P/R/F1 + κ + confusion matrix the other tasks report. Pure relabel of
+  the existing task-agnostic cache ⇒ **no re-extraction**, ~3–4 h train per encoder. Also changed
+  in the same edit: a `--tasks` subset run now **merges** into `phgroups_<tag>_s<seed>.json`
+  instead of truncating it, so the four finished 4-task files are extended in place.
+  **4 cells to run** (tssl256comb215 / videomae_rtmri / videomae / pretrained) — command in the
+  *Reproduce* section, step 2b. Beat-this floor: all-Consonant gives macro-F1 **0.378** / accuracy
+  0.609 on `test_lss`.
 
 Each row: run `eval_phoneme.py` with the config + `--encoder/--model/--probe/--loss/
 --seed`, record `test` + `tests.test_lss` from the output JSON.

@@ -1,0 +1,86 @@
+# Stuttering BINARY fluent-vs-disfluent — DYNAMIC length × FULL SPATIAL GRID.
+#
+# The §12-phase-2c spatial-detail test (fixed 32f: tssl256 grid 0.817 vs pooled 0.785,
+# +0.032) carried to the dynamic-length path: keep the S'=256 spatial tokens per frame
+# instead of mean-pooling them, so the probe sees space AND real temporal extent.
+#
+# Cache is ragged [ΣL, S', D] fp16 and LARGE — it scales with sample_fps:
+#     25 fps ->  62 GiB   |  50 fps -> 110 GiB  |  native (~99 fps) -> 204 GiB
+# so this runs under SLURM with the phoneme-Phase-2 OOM fixes (see the module docstring
+# of eval_stutter_binary_dynamic.py): madvise'd extraction, padded-token batching,
+# bounded eval loaders, fp16 items.
+#
+#   python -m artijepa.eval_stutter_binary_dynamic \
+#       --config configs/eval_stutter_binary_dyn_fullgrid.yaml --sample-fps native
+meta:
+  out: /scratch1/hongn/artijepa/eval/stutter_binary
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/stutter_binary
+  seed: 0
+  dtype: float16
+  # FINAL epoch-215 combined T-SSL snapshot; matches the phoneme `tssl256comb215` arm.
+  tag: tssl256comb215
+
+encoder:
+  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_215.pt
+  key: target_encoder
+  model_name: vit_large
+
+data:
+  root: /scratch1/hongn/stuttering
+  tiers: [disfluency]
+  neg_per_pos: 1.0
+  build_seed: 0
+  min_dur: 0.20
+  max_dur: 8.0
+  merge_gap: 0.25
+  # ---- splits ----
+  split_mode: loso        # {loso, fixed, random}
+  test_speaker: PWS10
+  val_speaker: null
+  val_frac: 0.15
+  # ---- dynamic sampling: variable #windows per event ----
+  # Default 25 fps (62 GiB cache, completes in one all-folds job ~7 h). 50 fps done too.
+  # native (~99 fps, 204 GiB) was DROPPED — 25>50 fps monotone-down (see RESULTS_stutter.md
+  # / §12 phase 2d); a single native all-folds job can't finish 7 folds in one wall, so if
+  # ever wanted run it per-fold via FOLDS=<spk> (7 jobs). Override with --sample-fps.
+  sample_fps: 25          # K = ceil(dur*fps/window) -> L p50=32 max=112
+  window: 32              # frames per in-distribution encoder window (32f checkpoint)
+  spatial_size: 256
+  spatial_mode: resize
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats_combined.json
+  event_pad_s: 0.0
+  # native fps means K up to 25 windows/clip; 2 clips/step keeps the encoder forward
+  # (K×32f×256px) inside V100-32GB.
+  extract_clip_batch: 2
+  num_workers: 6
+  cpu_threads: 2
+
+probe:
+  type: seq_attentive_lstm   # chunked AttentivePooler over S' -> packed bi-LSTM -> masked mean
+  epochs: 30
+  warmup: 4
+  lr: 1.0e-3
+  wd: 0.01
+  heads: 8
+  dropout: 0.1
+  lstm_hidden: 256
+  lstm_layers: 1
+  bidirectional: true
+  class_weight: balanced
+  # ---- OOM knobs (full-grid path only; see eval_stutter_binary_dynamic docstring) ----
+  # Budget PADDED temporal tokens per batch, not clips: L spans 16..400 at native fps.
+  # One padded batch = max_tokens × S'=256 × D=1024 fp16 = 512 MiB.
+  max_tokens: 1024
+  chunk: 32               # temporal chunk for the per-frame spatial pool
+  checkpoint: true        # gradient-checkpoint it -> peak ~O(B*chunk*S')
+  # HOST RAM BUDGET -- independent of the 204 GiB cache size (see _ragged_loader):
+  #   (train_workers × train_prefetch + eval_workers × 1) × 512 MiB
+  # = (4×2 + 2×1) × 512 MiB = 5.0 GiB of loader buffers. Plus ~5 GiB torch/CUDA and
+  # one in-flight batch => ~11 GiB steady state, so --mem=64G is ample. Halve
+  # max_tokens to 512 if a fold ever runs tight; it only changes batch granularity.
+  train_workers: 4
+  train_prefetch: 2
+  eval_workers: 2         # × prefetch_factor=1 on the val/test loaders

@@ -1,0 +1,65 @@
+# =============================================================================
+# Glossectomy SEGMENT-level phoneme classification (Test 4 / docs/GLOSS.md §12)
+# =============================================================================
+# TRANSFER eval, NO retraining: the Annot-16-trained **Phase-3 clip probes**
+# (eval/phgroups/phgroups_<enc>_s<seed>_<task>.pt) are applied to gloss segments,
+# separately for pre- and post-glossectomy, at four granularities:
+#   vowels(15) | consonants(25) | manner(5) | place(8)
+# One sample = ONE gold phoneme cut by its start-end alignment (FPS 50), so this is
+# the segment-level counterpart of the frame-level transfer in configs/eval_gloss.yaml.
+# Metrics: macro/weighted F1 + precision + recall + per-class + confusion matrix + κ,
+# pooled AND per speaker × session (spk2 has two post-op sessions: post1 / post2).
+#
+# The geometry MUST match the probe's training geometry (256px / 32f / fps 50 /
+# tubelet 2) — eval_gloss_groups.py hard-fails on a mismatch rather than producing
+# quietly wrong numbers.
+#
+# dtype float16: the gloss box is a Pascal P100/V100 (no bf16); the Phase-3 anchors
+# were extracted in fp16 too, so this is consistent (docs/GLOSS.md §12.10).
+#
+# RUN:
+#   source dev_artiJEPA/scripts/_env.sh
+#   cd /project2/shrikann_35/hongn/vjepa2
+#   PYTHONPATH=.:dev_artiJEPA python -m artijepa.eval_gloss_groups \
+#       --config dev_artiJEPA/configs/eval_gloss_groups.yaml \
+#       --encoder tssl256comb215 --seed 0 --cluster --figs
+# -----------------------------------------------------------------------------
+
+meta:
+  out: /scratch1/hongn/artijepa/eval/gloss
+  # OWN cache tree: the ragged clip cache is keyed on the manifest, so gloss features
+  # never collide with the Annot-16 Phase-3 cache (feat_cache/phgroups/...).
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/glossphg
+  seed: 0
+  dtype: float16
+  tag: null            # set per-condition by eval_gloss_groups.py (glossphg_{pre,post}_*)
+
+# ENCODER — frozen, must be the SAME checkpoint the Phase-3 probes were trained on
+# (tssl256comb215 = the final ckpt_215 of the combined 256px T-SSL run).
+encoder:
+  spec: /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_215.pt
+  model_name: vit_large
+  checkpoint: null
+  key: auto
+
+# PROBE — nothing is trained here; these only size the inference loaders.
+probe:
+  batch_size: 128
+  workers: 4
+  preload_gb: 20.0     # gloss splits are small (~10 GB total) -> preload to RAM
+
+# DATA — manifest is overridden per condition by the driver
+# (/scratch1/hongn/gloss/gloss_{pre,post}_manifest.csv, with spk3's post session
+# optionally swapped for the duration-repaired one via --spk3-repaired).
+data:
+  manifest: /scratch1/hongn/gloss/gloss_pre_manifest.csv
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32      # encoder window; a segment is edge-padded up to it
+  target_fps: 50.0
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  batch_size: 6            # 256px extraction on a 16 GB P100
+  num_workers: 4

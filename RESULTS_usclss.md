@@ -11,7 +11,10 @@ Seconds-based alignment, tubelet 2 / patch 16. Why κ and not accuracy: see
 Generated 2026-07-05 from two driver runs (`scripts/18_eval_comb100.sh` bf16 on
 d13-03, `scripts/17_probe_weights_256.sh` fp16 baselines on d14-10). Every row is
 **3 seeds {0,1,2}** with **saved probe weights** (`.pt` beside each `.json`).
-Companion: `RESULTS.md` (full project log), `TODO_eval.md` (eval plan).
+Companion: `RESULTS.md` (full project log), `TODO_eval.md` (eval plan),
+`docs/phonePred.md` (datasets + how to run), `RESULTS_phonepred.md` (the combined
+75-Speaker Annot-16 + usc_lss **cross-domain** eval that trains on 14 Annot-16
+speakers and tests both in-domain and on usc_lss).
 
 ---
 
@@ -108,6 +111,45 @@ a model that systematically over-predicts common vowels has that skew baked into
 `npd` and correctly discounted in `p_e`. PER is the only metric that regroups tokens
 per utterance (it's a sequence/edit-distance metric); κ and frame-accuracy are flat,
 pooled, order-independent.
+
+---
+
+## Visualizations — t-SNE / UMAP + confusion matrices
+
+Two qualitative panels corroborate the κ ranking *non-circularly* (per-class, not
+frequency-dominated). Both reuse the frozen **attentive** caches + saved probes — no
+re-extraction, CPU-only. Reproduce: `RUNME.md §6`. Outputs under
+`/scratch1/hongn/artijepa/eval/{tsne,confmat}/`.
+
+**t-SNE / UMAP** (`artijepa/tsne_phonemes.py`) — per-token features projected to 2-D,
+colored by manner class. Rep **B** (raw-pooled, no probe) is the load-bearing panel:
+T-SSL shows visibly tighter manner clusters than pretrained/VideoMAE, and base_resnet
+is a near-uniform blob — the intrinsic-geometry story behind the κ gap.
+Files: `compare_rep{A,B}_{tsne,umap}_s0.png` (cols = encoders) + `tsne_<enc>_s0.png`.
+
+**Confusion matrices** (`artijepa/confmat_phonemes.py`) — the trained probe's *actual*
+per-token phoneme predictions on the test split, row-normalized to recall %, at three
+granularities: **groups** (7 manner classes), **vowels** (15 vocalic phonemes),
+**consonants** (26). Files: `confmat_{groups,vowels,consonants}_compare_s0.png` (cols =
+encoders) + per-encoder `confmat_<enc>_s0.png` + `confmat_values_s0.json` (raw counts +
+row-normalized recall for every encoder/granularity, for downstream analysis).
+
+**Macro-recall** (mean per-class diagonal — class-balanced, so *not* κ's frequency
+bias) tracks the κ ranking on all three granularities (seed 0):
+
+| encoder | groups | vowels | consonants | test κ |
+|---|---|---|---|---|
+| **tssl256comb100** | **0.641** | **0.507** | **0.525** | 0.558 |
+| base: VideoMAE-L | 0.596 | 0.458 | 0.437 | 0.494 |
+| pretrained256 | 0.563 | 0.417 | 0.406 | 0.460 |
+| base: resnet-50 | 0.415 | 0.216 | 0.226 | 0.275 |
+
+Structure the matrices reveal: (1) the dominant error everywhere is leakage into the
+**Vowel** column (majority manner), but T-SSL leaks *least*; (2) **Affricate↔Fricative**
+(ch/jh ↔ s/sh) is the sharpest cross-class pair, worst on resnet; (3) base_resnet
+collapses on **Diphthong** (recall 27% vs T-SSL's 63%, most of it → Vowel), consistent
+with its blob-like t-SNE. So the T-SSL lift is broad-based across manner, not a
+majority-class artifact.
 
 ---
 

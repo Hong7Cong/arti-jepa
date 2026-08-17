@@ -1,0 +1,149 @@
+# =============================================================================
+# Phoneme-prediction eval  --  cross-domain split over 75-Speaker Annot-16 + usc_lss
+# =============================================================================
+# Train on 14 Annot-16 speakers (75-Speaker rt-MRI, 84x84 @ 83.28 fps), model-select
+# on 1 held-out speaker (val = sub030), and report TWO held-out test sets with the
+# SAME best-val probe:
+#   * test      -- in-domain held-out speaker  (sub043, 75-Speaker corpus)
+#   * test_lss  -- cross-domain usc_lss        (OOD speaker usc_s1, 104x104 @ 99 fps)
+# Alignment is in seconds, so heterogeneous native fps/res is handled by the resample.
+# Manifest built by: /scratch1/hongn/speaker75/merge_annot16_phonemes.py --split xdomain
+#
+# RUN:
+#   cd /project2/shrikann_35/hongn/vjepa2
+#   PYTHONPATH=.:dev_artiJEPA python -m artijepa.eval_phoneme \
+#       --config dev_artiJEPA/configs/eval_phoneme_annot16_combined.yaml --dtype float16
+#   # everything below can also be overridden on the CLI:
+#   #   --encoder <path>  --model <videomae|clip|...>  --probe <type>  --loss <ce|ctc>
+#   #   --tag <name>  --seed <n>  --dtype <bfloat16|float16|float32>  --batch <n>
+# -----------------------------------------------------------------------------
+
+meta:
+  out: /scratch1/hongn/artijepa/eval          # <-- results + PROBE WEIGHTS saved here
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/phoneme   # frozen-feature cache
+  seed: 0
+  dtype: float16          # !! V100 has NO bf16 -> use float16 (set here or pass --dtype float16).
+                           #    L40S/Ada: bfloat16 is fine.
+  tag: null                # null -> derived from encoder.spec; set a name to label outputs
+  save_probe: true         # write the best-val probe weights (.pt); false = metrics json only
+
+# -----------------------------------------------------------------------------
+# ENCODER  --  pick ONE of the three families below (frozen; features are extracted once)
+# -----------------------------------------------------------------------------
+# FAMILY A) Arti-JEPA / V-JEPA ViT   (this block as written; encoder.type OMITTED)
+#   spec: pretrained                                   # off-the-shelf V-JEPA2 baseline (vitl.pt)
+#   spec: /scratch1/hongn/artijepa/runs/<NAME>/latest.pt   # one of YOUR trained encoders:
+#         tssl_vitl_256_combined   <- T-SSL, combined rt-MRI (your main adapted encoder)
+#         tssl_vitl_256 | tssl_vitl_128
+#         aucjepa_vitl_256 | aucjepa_vitl_256_ddp | aucjepa_vitl_128
+#         acjepa_arti6_256_v100 | acjepa_arti6_256_v100_ctx2 | acjepa_arti6_256_ddp
+#         aai_wavlm_256_combined_L9_ctx2 | ..._ctx1_xattn | ..._ctx1_film | ..._ctx2_stateonly
+#   model_name: vit_large | vit_huge | vit_giant | vit_giant_384   (MUST match the ckpt arch)
+#   key: auto            # 'target_encoder' for run ckpts, else 'encoder'
+#
+# FAMILY B) VideoMAE (3-D video SSL)   -> add `type: videomae`
+#   type: videomae
+#   model: MCG-NJU/videomae-large        # off-the-shelf K400 VideoMAE (HF), OR a local HF dir.
+#   # Your rt-MRI VideoMAE (checkpoint-214.pth) is in REPO format -> convert repo->HF first,
+#   # then point `model:` at that HF dir. Native 224px/16f/tubelet2 (overrides geometry below).
+#
+# FAMILY C) 2-D image baselines (per-frame)   -> add `type: image_baseline`
+#   type: image_baseline
+#   model: clip | siglip | dinov2 | vitl | resnet | <any full timm name>
+# -----------------------------------------------------------------------------
+encoder:
+  spec: pretrained         # Family A, off-the-shelf V-JEPA2 baseline
+  model_name: vit_large
+  checkpoint: null
+  key: auto
+
+# -----------------------------------------------------------------------------
+# PROBE  --  small head trained on the frozen features (this is what actually trains)
+# -----------------------------------------------------------------------------
+# probe.type -- 7 choices, by temporal-context capacity / spatial-awareness:
+#   POOLED heads  (consume mean-over-space [B,T',D]; share ONE feature cache):
+#     linear       -- per-token linear, no context
+#     mlp          -- per-token MLP, no context
+#     tcn          -- local 1-D temporal conv (+/-2 tokens)          [used in the baseline run]
+#     lstm         -- bi-LSTM, full-sequence recurrence
+#     transformer  -- self-attention encoder, global context
+#   SPATIAL-AWARE heads (consume the un-pooled [B,T',S',D] grid; SEPARATE cache):
+#     tcn_spatial  -- learned attn-pool over space per step, then TCN over time  (CE only)
+#     attentive    -- V-JEPA AttentivePooler over space per step     [your HEADLINE probe]
+#                     (CE only; chunk-mode -- this is the Phase 1 headline, unchanged)
+#     attentive_lstm -- AttentivePooler over space per step -> bi-LSTM over time.  CE *and*
+#                     CTC.  [Phase 2 loss-axis probe]  Trained in UTTERANCE mode: whole
+#                     utterances (~800 tokens), not 0.64 s / 16-token chunks, so the recurrence and
+#                     CTC both see the full utterance.  Run CE here too (not vs Phase 1's
+#                     chunk-mode `attentive`) or the CE-vs-CTC comparison would confound
+#                     the loss with temporal context (816 tokens vs 16).
+#
+# probe.loss -- ce (per-token: reports kappa + PER) | ctc (alignment-free: PER only).
+#               ctc requires a POOLED head or attentive_lstm; the chunk-mode spatial heads
+#               (attentive / tcn_spatial) are CE-only and raise if given ctc.
+# -----------------------------------------------------------------------------
+probe:
+  type: attentive          # <-- matches your prior usc_lss headline runs (was tcn in the 1st run)
+  loss: ce
+  epochs: 30               # was 100; probe I/O-bound (~30-55 min/epoch reading the 149 GiB
+                           # spatial cache under a 24 GB job) -> 100 epochs was ~days. Frozen
+                           # probe val-kappa plateaus early; bump back up under a big-mem job.
+  warmup: 4
+  lr: 1.0e-3
+  wd: 0.01
+  hidden: 512
+  batch_size: 32
+  # TRAIN loader: bounded-RAM sequential streaming (_FeatStream) -- fixes the ~tens-of-
+  # MB/s random full-shuffle re-read of the 149 GiB spatial cache under a small --mem job.
+  workers: 8               # concurrent sequential readers; ~= FS-bandwidth aggregate
+  buf: 96                  # per-worker shuffle buffer (rows). RAM ~= workers*buf*8MB (~6 GB)
+  ipe: null                # null -> full pass/epoch; set N to cap to N micro-batches/epoch
+  # UTTERANCE mode only (attentive_lstm): batch whole utterances up to this many temporal
+  # tokens (>=1 utt always, so a longer utt still runs alone). Utterances span 400-1968
+  # tokens and spatial activations scale with sum(T_u)*S', so a fixed utt batch_size would
+  # swing peak GPU ~5x; budgeting tokens keeps it flat. 1024 -> ~6.2 GB peak on a V100-32GB
+  # (measured); the longest single utt (1968 tok) ~12 GB. batch_size above is NOT used here.
+  utt_max_tokens: 1024
+  # UTTERANCE eval loaders (val/test/test_lss) run single-pass + order-invariant, so they
+  # use fewer workers x prefetch_factor=1 to bound host RAM (the Jul-15 test_lss cgroup OOM).
+  utt_eval_workers: 2      # default max(1,min(2,utt_workers)); raise only under a big --mem job
+  # FOCAL loss only (--loss focal): CE reweighted by (1-p_t)^gamma. Higher gamma = more
+  # down-weighting of easy/high-frequency frames (silence, dominant vowels) -> more gradient
+  # on the rare/hard phonemes. gamma=0 == plain CE; 2.0 is the Lin et al. (2017) default.
+  focal_gamma: 2.0
+
+# -----------------------------------------------------------------------------
+# DATA  (leave as-is unless changing geometry)
+# -----------------------------------------------------------------------------
+data:
+  kind: usc_lss            # generic gold-phoneme dataloader (manifest + per-utt json)
+  manifest: /scratch1/hongn/annot16_phonemes/phoneme_manifest_combined.csv
+  extra_test_splits: [test_lss]   # 2nd held-out test evaluated with the best-val probe
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
+  spatial_size: 256        # 128 fast / 256 headline; ViT is res-agnostic (RoPE)
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 50.0         # 32f @ 50fps = 0.64 s; tubelet 2 -> 16 tokens @ 25 Hz (40 ms)
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  batch_size: 16           # extraction batch
+  num_workers: 4
+
+# -----------------------------------------------------------------------------
+# OUTPUTS & TIMING  (reference)
+# -----------------------------------------------------------------------------
+# Files written to meta.out (=/scratch1/hongn/artijepa/eval):
+#   phoneme_usc_lss_<tag>_<hash10>_<probe>_<loss>_s<seed>.json   <- metrics (both test sets)
+#   phoneme_usc_lss_<tag>_<hash10>_<probe>_<loss>_s<seed>.pt     <- PROBE WEIGHTS (best-val)
+#   ("usc_lss" = data.kind label, not the speaker; <tag>=annot16comb here; <hash10> encodes
+#    encoder spec + geometry + manifest + pool_spatial.)
+# Frozen features cached under meta.cache_dir/<tag>_<hash>/{train,val,test,test_lss}.*.npy
+#
+# Duration on ONE V100 (spatial_size 128, this manifest ~13k tiles):
+#   feature extraction (ONE-TIME, cached): ~5.5 min for POOLED heads; SPATIAL heads
+#       (attentive/tcn_spatial) keep the full S' grid -> larger, extraction ~2-3x longer.
+#   probe training (40 epochs on cached feats): ~1-2 min.
+#   => cold run ~7 min (pooled) / ~12-18 min (spatial). Re-running a DIFFERENT probe of the
+#      SAME pool-class on the SAME encoder reuses the cache -> only the ~1-2 min probe stage.
+#      (pooled heads share one cache; the two spatial heads share a second cache.)

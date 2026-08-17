@@ -140,21 +140,28 @@ Compare vs `tssl256` (0.527) and `pretrained256` (0.449) → fills the TBA row.
 
 ---
 
-## 6. Phoneme-structure visualization — t-SNE / UMAP (`artijepa/tsne_phonemes.py`)
+## 6. Phoneme-structure visualization — t-SNE / UMAP + confusion matrices
 
-Visualize whether the frozen per-token features separate by phoneme, colored by
-**phonetic class** (Vowel/Diphthong/Plosive/Fricative/Affricate/Nasal/Approximant;
-`sil` and padded tokens dropped). Reuses the **attentive** feature caches + saved
-probes from §2/§4 — no re-extraction. Two representations, **both** rendered:
+Two qualitative views of the frozen features, both **reusing the attentive caches +
+saved probes from §2/§4** (no re-extraction), **CPU-only**, colored/binned by
+**phonetic class** (Vowel/Diphthong/Plosive/Fricative/Affricate/Nasal/Approximant).
+Results in `RESULTS_usclss.md` → "Visualizations". Encoder keys = the eval tags
+(`tssl256comb100`, `tssl256`, `pretrained256`, `videomae`,
+`base_{vitl,dinov2,siglip,clip,resnet}`).
+
+> **Env deps (one-time):** these two scripts need `matplotlib` + `scikit-learn`
+> (+ optional `umap-learn`), which are **not in the base `artijepa` env** — install
+> once: `pip install matplotlib scikit-learn umap-learn`. Without umap, t-SNE still
+> runs (UMAP skipped with a note).
+
+### 6a. t-SNE / UMAP (`artijepa/tsne_phonemes.py`)
+Whether per-token features separate by phoneme (`sil` + padded tokens dropped). Two
+representations, **both** rendered:
 - **B (raw-pooled)** — `feats.mean(S')`, the encoder's OWN per-token vector, NO
   trained probe → intrinsic encoder geometry (the non-circular panel: tighter
   clusters for T-SSL vs a baseline visually corroborates the κ ranking).
 - **A (trained-q)** — the AttentivePooler output (penultimate vector the linear
   classifier reads), reconstructed from the probe `.pt`; the probe's decision space.
-
-CPU-only (no GPU needed). The probe `.pt`'s `feature_tag` locates the cache, so it
-is robust to stale hashes. UMAP is optional (`pip install umap-learn`; skipped with
-a note if absent).
 
 ```bash
 # one encoder, both reps × {t-SNE, UMAP} -> eval/tsne/tsne_<enc>_s0.png
@@ -165,15 +172,63 @@ python -m artijepa.tsne_phonemes \
       --encoder tssl256comb100,pretrained256,videomae,base_resnet
 # -> eval/tsne/compare_rep{A,B}_{tsne,umap}_s0.png  (+ per-encoder PNGs)
 ```
-Encoder keys = the eval tags (`tssl256comb100`, `tssl256`, `pretrained256`,
-`videomae`, `base_{vitl,dinov2,siglip,clip,resnet}`). Flags: `--rep {both,A,B}`,
-`--method {both,tsne,umap}`, `--cap N` (max tokens/phoneme, default 200),
-`--seed`, `--perplexity`. Requires the attentive probe `.pt` + its `sp_` cache to
-exist (run §2/§4 first). Outputs → `/scratch1/hongn/artijepa/eval/tsne/`.
+Flags: `--rep {both,A,B}`, `--method {both,tsne,umap}`, `--cap N` (max
+tokens/phoneme, default 200), `--seed`, `--perplexity`. The probe `.pt`'s
+`feature_tag` locates the cache (robust to stale hashes). Outputs →
+`/scratch1/hongn/artijepa/eval/tsne/`.
+
+### 6b. Confusion matrices (`artijepa/confmat_phonemes.py`)
+The trained attentive probe's **actual** per-token phoneme predictions on the test
+split, tabulated as row-normalized recall %, at three granularities:
+**groups** (7 manner classes), **vowels** (15 vocalic), **consonants** (26). Also
+prints a **macro-recall** table (mean per-class diagonal — class-balanced, so it
+corroborates κ without κ's frequency bias).
+
+```bash
+# cross-encoder confusion panels + per-encoder + macro-recall table to stdout:
+python -m artijepa.confmat_phonemes \
+      --encoder tssl256comb100,pretrained256,videomae,base_resnet
+# -> eval/confmat/confmat_{groups,vowels,consonants}_compare_s0.png
+#    + per-encoder confmat_<enc>_s0.png
+#    + confmat_values_s0.json  (raw counts + row-normalized recall, all encoders)
+```
+Flags: `--seed`, `--which {all|groups,vowels,consonants}`. Requires the same
+attentive probe `.pt` + `sp_` cache as §6a. Outputs →
+`/scratch1/hongn/artijepa/eval/confmat/`.
 
 ---
 
-## 7. Task-1 pseudo labels — TBA (env-blocked)
+## 7. Pre/post-glossectomy phoneme decoding + viz (`gloss`, transfer eval)
+
+Apply the usc_lss-trained **attentive** probe (default `tssl256comb100`, the winner)
+**with no retraining** to gloss features, separately for **pre-** vs
+**post-**glossectomy → per-condition κ/PER + pre-vs-post t-SNE + confusion matrices.
+One probe on both conditions ⇒ a clean pre→post Δ. Data on `/scratch1/hongn/gloss`
+(3 speakers × {pre,post}, MFA `phones` tier; paired `resampled_video` @100 fps/104²).
+Needs a GPU for feature extraction (the P100 gloss box → `dtype: float16`).
+
+```bash
+# 1) build usc_lss-format manifests + JSON from the TextGrids (strict video pairing):
+python -m artijepa.gloss                      # -> gloss_{pre,post}_manifest.csv
+# 2) transfer the probe, extract per-condition features, render pre-vs-post panels:
+python -m artijepa.eval_gloss --encoder tssl256comb100          # pooled across speakers
+python -m artijepa.eval_gloss --encoder tssl256comb100 --speaker spk1   # matched Δ (cleanest)
+```
+Prints a **pre vs post Δ** table (κ / PERµ / frame-acc / macro-recall) and writes to
+`/scratch1/hongn/artijepa/eval/gloss/`: `gloss_transfer_<enc>[_<spk>]_s0.json`,
+`confmat_gloss_{groups,vowels,consonants}_<enc>[_<spk>]_s0.png`,
+`tsne_gloss_rep{A,B}_tsne_<enc>[_<spk>]_s0.png`. Flags: `--speaker {spk1,spk2,spk3}`,
+`--rep {both,A,B}`, `--method {tsne,umap}`, `--build` (rebuild manifests first),
+`--seed`. Requires §6 env deps + the §2 usc_lss probe `.pt`.
+
+> **⚠ Confounds:** the **pooled** run mixes speaker with condition (pre is spk1-heavy,
+> post spk2-heavy) → prefer `--speaker spk1` (28 pre / 13 post, both well-aligned) for
+> the clean matched Δ. The probe was trained on **bf16** usc_lss features and is applied
+> to **fp16** gloss features (P100 has no bf16) — a small, documented precision shift.
+
+---
+
+## 8. Task-1 pseudo labels — TBA (env-blocked)
 
 Decoupled (audio model needs `transformers<5` or torch≥2.7):
 ```bash

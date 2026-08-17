@@ -2,8 +2,11 @@
 # Phoneme-GROUPS eval (Phase 3)  --  clip-level phoneme classification
 # =============================================================================
 # One sample = ONE phoneme, cut from the video by its start-end alignment and
-# classified with a SINGLE label (clip-level), at four granularities:
-#   vowels(15) | consonants(25) | manner(5, consonants) | place(8, consonants)
+# classified with a SINGLE label (clip-level), at five granularities:
+#   vowcons(2, vowel-vs-consonant, all non-sil) | vowels(15) | consonants(25) |
+#   manner(5, consonants) | place(8, consonants)
+# vowcons is binary -> its metrics also carry roc_auc / average_precision / f1_binary
+# (Consonant = positive class).
 # Head = attentive_lstm in CLIP mode: AttentivePooler over S' per temporal step ->
 # bi-LSTM over the phoneme's variable-length token sequence -> LAST hidden state
 # (the single phoneme vector) -> linear -> class logits.  Metrics: macro/weighted
@@ -58,7 +61,8 @@ probe:
   dropout: 0.1
   batch_size: 128          # clip-classification: many short clips per batch
   workers: 6
-  tasks: null              # null -> all of [vowels, consonants, manner, place]; or a subset
+  tasks: null              # null -> all of [vowcons, vowels, consonants, manner, place];
+                           # or a subset (a subset run MERGES into the existing JSON)
   # RAM-preload budget for the SMALL, re-read splits (val every epoch; test/test_lss once).
   # TRAIN deliberately stays on the memmap + workers -- preloading it (40-60 GB) forces
   # num_workers=0 to avoid a fork/OOM and ends up SLOWER than the I/O it saves.

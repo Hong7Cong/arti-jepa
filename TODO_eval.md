@@ -27,6 +27,13 @@ alignment, CTC-collapse, PER, κ), `usc_lss.py` (OOD manifest+dataset),
 Probe heads: `linear`/`mlp`/`tcn`/`lstm`/`transformer` (CE/CTC) +
 `tcn_spatial`/`attentive` (spatial-aware, the winners).
 
+**Viz tooling (DONE 2026-07-06):** `artijepa/tsne_phonemes.py` (t-SNE/UMAP of frozen
+per-token features by manner class) + `artijepa/confmat_phonemes.py` (the trained
+probe's per-token confusion at groups/vowels/consonants granularity + macro-recall
+table). Both reuse the attentive `sp_` caches + saved probe `.pt` — CPU-only, no
+re-extraction. Run/deps: `RUNME.md §6`; results: `RESULTS_usclss.md` → Visualizations.
+**These are the reusable renderers for the gloss task (#9) below.**
+
 ---
 
 ## ▶ HIGH PRIORITY
@@ -90,7 +97,7 @@ seconds-based alignment + frozen-encoder→per-token-feature path from
 > usc_lss phoneme eval (see the VideoMAE section below), not the disfluency task.
 Segment-level classification of **disfluency type** from frozen (or fine-tuned)
 rtMRI features. Infra landed 2026-06-30; the runs themselves are TBA.
-- **Data:** `/data1/span_data/stuttering/PWS{3,4,5,6,7,8,10}/textgrid/*.TextGrid`
+- **Data:** `/scratch1/hongn/stuttering/PWS{3,4,5,6,7,8,10}/textgrid/*.TextGrid`
   (498 files, 7 PWS speakers) + paired `avi/` video (104×104 @ 99 fps, **same
   geometry as usc_lss**). Two label tiers:
   - `disfluency` (primary): ~2100 labeled events. Canonical types
@@ -127,20 +134,43 @@ bash scripts/16_eval_disfluency.sh --model videomae --tag vmae_frozen
 bash scripts/16_eval_disfluency.sh --mode finetune --model videomae --tag vmae_ft
 ```
 
-### 9. Pre/post-glossectomy phoneme classification (gloss) — **NOT STARTED (TBA)**
-Phoneme decoding evaluated **separately for pre- vs post-glossectomy** to quantify
-articulatory change and compensation.
-- **Data:** `/data1/span_data/gloss/spk{1,2,3}/{pre,post}/textgrids/*.TextGrid`
-  (spk2 has `post1`/`post2`). Tiers: `words` + `phones` (ARPABET + stress, MFA
-  forced-aligned). Paired video in `gloss/resampled_video`; ROIs in
-  `gloss/roi_boxes`,`gloss/roi_time_series`; SAM seg in `gloss/spkN/sam_seg`.
-- **Task:** per-token phoneme classification (same head/metrics as Task 2) run on
-  pre and on post; report the **pre→post Δ** in κ/PER/accuracy per speaker
-  (degradation under altered anatomy).
-- **Bonus:** binary **pre-vs-post condition classification** from features — a
-  proxy for whether the encoder captures compensatory articulation.
-- **Metric:** per-phoneme accuracy, **κ, PER**; pre vs post delta; per-speaker.
-- **Need:** `gloss.py` (parser + manifest, video pairing), `configs/eval_gloss.yaml`.
+### 9. Pre/post-glossectomy phoneme decoding + viz (gloss) — **BUILT; runs in progress (2026-07-07)**
+**Transfer** eval: the winning usc_lss `tssl256comb100` attentive spatial probe is
+applied — **no retrain** — to gloss features, separately for pre- vs post-glossectomy,
+for a clean pre→post Δ in κ/PER + directly comparable t-SNE + confusion matrices.
+- **Data (downloaded):** `/scratch1/hongn/gloss` — 3 speakers × {pre, post}, MFA
+  forced-aligned `phones` tier (uppercase ARPABET+stress). Paired video =
+  **`resampled_video/spk*/<cond>/<utt>.avi`** (uniform **100 fps, 104×104**, 1:1
+  basename with the TextGrid). Also present: `roi_boxes`, `roi_time_series`,
+  `spk*/sam_seg` (for the future dense-head / AAI tasks). ⚠ `/data1/span_data/gloss`
+  is **not** the live path — data now lives on `/scratch1/hongn/gloss`.
+- **Decision made — TRANSFER** (not fresh probe): one probe on both conditions ⇒ the
+  Δ(pre,post) is not confounded by two different probes. The probe's `encoder_spec`
+  names the frozen encoder (`ckpt_100.pt`) to rebuild for feature extraction.
+- **Built (2026-07-07):**
+  - `artijepa/gloss.py` — `phones`-tier parser (`AY1`→`ay`: lowercase + strip stress;
+    `""`/`sp`/`spn`→`sil`) → usc_lss-format JSON + `gloss_{pre,post}_manifest.csv`.
+    **Strict pairing:** keep an utt only if the resampled video exists AND
+    `|vid_dur − TextGrid.xmax| ≤ max(1s, 10%)` — drops mis-named/mis-aligned files
+    (built: **pre 56** {spk1 28, spk2 17, spk3 11}; **post 44** {spk1 13, spk2 28,
+    spk3 3}; 16 dropped, mostly spk3/post).
+  - `configs/eval_gloss.yaml` (256px, `kind: usc_lss`, `dtype: float16` for the P100).
+  - `artijepa/eval_gloss.py` — transfer driver: extract per-condition features
+    (`eval_phoneme.extract`, cached as `gloss_{cond}_<enc>sp_*`), apply the loaded
+    probe (`predict`) → κ/PER (`evaluate`) + pre-vs-post confusion matrices + t-SNE
+    (reuses `confmat_phonemes` / `tsne_phonemes` helpers). Writes
+    `eval/gloss/{confmat_gloss_*,tsne_gloss_*,gloss_transfer_*.json}`.
+- **Run:** `python -m artijepa.gloss` then `python -m artijepa.eval_gloss --encoder
+  tssl256comb100` (pooled) / `--speaker spk1` (matched Δ). See `RUNME.md §7`.
+- **⚠ Caveats:** (1) **speaker↔condition confound** in the pooled run (pre is
+  spk1-heavy, post is spk2-heavy) → the `--speaker spk1` run (28 pre / 13 post, both
+  well-aligned) is the clean matched Δ. (2) probe trained on **bf16** usc_lss feats,
+  applied to **fp16** gloss feats (P100 has no bf16) — small, noted precision shift.
+- **Expected:** post shows looser t-SNE clusters + more off-diagonal mass, esp.
+  tongue-dependent coronals (t/d/s/z/l/r) & velars (k/g) — the compensation signature.
+- **TODO next:** per-speaker spk1 matched run; add gloss results to `RESULTS_usclss.md`;
+  optional **fresh in-domain gloss probe** (needs a pre/post train/val split) as the
+  ceiling reference; **binary pre-vs-post condition classifier** (bonus).
 
 ### 10. Articulatory-condition JEPA — planning + eval metric — **PLANNING (TBA)**
 A **condition-aware JEPA**: encoder/predictor conditioned on articulatory condition

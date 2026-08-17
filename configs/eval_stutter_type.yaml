@@ -1,0 +1,76 @@
+# Stuttering DISFLUENCY-TYPE classification (Task 8c): block / rep / pro.
+# Frozen 256px T-SSL V-JEPA2 encoder -> attentive_lstm probe, leave-one-speaker-out,
+# probe weights saved per fold under meta.out/probes/.
+#
+# Same rows / clip loader / geometry as configs/eval_stutter_binary.yaml, so the
+# feature cache is SHARED with the binary eval: running this at the default tag +
+# 32f + a full-grid probe is a cache hit on
+#   /scratch1/hongn/artijepa/feat_cache/stutter_binary/tssl256_215_b5da470386
+# (3901 x 4096 x 1024 fp16, 31 GiB) and costs no extraction.
+#
+#   python -m artijepa.eval_stutter_type --config configs/eval_stutter_type.yaml
+#   ... --task type4          # + the fluent class (detection AND typing in one head)
+#   ... --probe attentive     # single joint space+time pooler instead of the LSTM
+#   ... --split fixed --test-speaker PWS10 --val-speaker PWS7
+meta:
+  out: /scratch1/hongn/artijepa/eval/stutter_type
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/stutter_binary   # shared with the binary eval
+  seed: 0
+  dtype: float16
+  tag: tssl256_215        # tag of the ckpt_215 cache built by the binary eval
+
+encoder:
+  checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_215.pt
+  key: target_encoder     # EMA target-encoder weights (keys already backbone.*)
+  model_name: vit_large
+
+data:
+  root: /scratch1/hongn/stuttering
+  tiers: [disfluency]
+  # ---- label space: type3 (block/rep/pro) | type4 (+fluent) | type5 (+osci/other) ----
+  task: type3
+  # ---- row builder: MUST match the binary eval's values or the cache tag changes ----
+  neg_per_pos: 1.0        # fluent negatives; ignored by type3/type5 (rows dropped),
+                          # used as the 4th class by type4
+  build_seed: 0
+  min_dur: 0.20
+  max_dur: 8.0
+  merge_gap: 0.25
+  # ---- splits ----
+  split_mode: loso
+  test_speaker: PWS10     # used by split_mode: fixed
+  val_speaker: null
+  val_frac: 0.15
+  # ---- clip geometry (match the checkpoint: 256px / 32f / tubelet 2) ----
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32     # -> T'=16 temporal tokens x S'=256 spatial tokens
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats_combined.json
+  event_pad_s: 0.0        # clip = the disfluency event exactly
+  batch_size: 8
+  num_workers: 6          # video-decode workers (extraction only; 0 on a cache hit)
+  probe_workers: 2        # feature-batch workers during probe training
+  cpu_threads: 2
+
+probe:
+  type: attentive_lstm    # attn-pool S' spatial tokens per frame -> BiLSTM over T'
+  epochs: 40
+  patience: 12            # early stop after N epochs with no val improvement (0 = off)
+  warmup: 4
+  lr: 1.0e-3
+  wd: 0.01
+  hidden: 512
+  heads: 8
+  dropout: 0.1
+  batch_size: 64
+  class_weight: balanced  # block/rep/pro are near-balanced overall but NOT per speaker
+  # ---- attentive_lstm ----
+  lstm_hidden: 256
+  lstm_layers: 1
+  bidirectional: true
+  temporal_pool: mean
+  chunk: 4                # temporal chunk for the per-frame spatial pool (VRAM)
+  checkpoint: false

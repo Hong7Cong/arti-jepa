@@ -1,18 +1,80 @@
 # RESULTS — AAI-JEPA (acoustic-conditioned rtMRI latent rollout)
 
-**Run:** `aai_wavlm_256_combined_L9_ctx2`
-**Config:** `configs/aai_wavlm_256_combined_L9_ctx2.yaml`
-**Run folder:** `/scratch1/hongn/artijepa/runs/aai_wavlm_256_combined_L9_ctx2`
-**What it is:** a frozen T-SSL ViT-L rtMRI encoder + a trainable audio-conditioned predictor that,
-given `ctx=2` seed latent frames, rolls out the remaining 14 of `T'=16` temporal tokens from
-**WavLM audio only**. Self-supervised (target = the frozen encoder's own future token embeddings);
-no arti-6, no phoneme labels. This is the **WavLM layer-9** variant (the layer −1 run's `audio_gap`
-never turned on).
+**What it is:** a frozen T-SSL ViT-L rtMRI encoder + a trainable audio-conditioned
+predictor that, given `ctx` seed latent frames, rolls out the remaining tokens of
+`T'=16` from **WavLM audio only**. Self-supervised (target = the frozen encoder's
+own future token embeddings); no arti-6, no phoneme labels. All runs use **WavLM
+layer-9** on the combined rtMRI corpus (the layer −1 run's `audio_gap` never turned on).
 
-> Snapshot written 2026-07-05, 09:34 PDT — run in progress at **epoch 12 / 20** (11 epochs logged).
-> See "Current status" at the bottom; update as it progresses.
+**The question:** does the rollout actually *use* the audio? Headline metric
+`audio_gap = val_shuf_ar_l1 − val_ar_l1` (shuffled-audio minus real-audio AR L1;
+**>0 ⇒ real audio helps**). Secondary: `val_tf_l1` (teacher-forced) and `val_ar_l1`
+(autoregressive) L1 in layer-normed feature space (↓). This doc sweeps the
+**conditioning variant** (ctx2 vs ctx1; FiLM vs cross-attention vs state-only).
+
+> Updated 2026-07-12. `audio_gap` stays small & positive across variants (weak but
+> non-zero audio use). FiLM was **extended 20 → 50 epochs** (COMPLETED): the longer
+> anneal **improved reconstruction** (val_tf_l1 0.501 → 0.450) but **did not lift
+> `audio_gap`** (converged 0.0022, ≈ its ep20 value; the 0.0201 @ ep2 peak was a
+> transient re-anneal artifact) — i.e. FiLM's weak audio use is **not** schedule-
+> limited. `xattn` was **stopped at ep44** (of a 100-ep extension).
 
 ---
+
+## Run sweep — headline (WavLM-L9, combined corpus, best-of / final)
+
+| Run (variant) | epochs | val_tf_l1 ↓ | val_ar_l1 ↓ | **audio_gap** | peak audio_gap | status |
+|---|---|---|---|---|---|---|
+| `…_L9_ctx2` (ctx2, ac_audio) | 12/20 | 0.517 | 0.548 | 0.0017 | 0.0046 @e7 | stopped early |
+| `…_L9_ctx2_stateonly` (ctx2, state-only) | 20/20 | 0.503 | 0.536 | 0.0004 | 0.0045 @e6 | done |
+| `…_L9_ctx1_film` (ctx1, **FiLM**) | **50/50** | 0.450 | 0.500 | 0.0022 | **0.0201 @e2** | done (extended 20→50) |
+| `…_L9_ctx1_xattn` (ctx1, **cross-attn**) | 43/100 | **0.431** | **0.485** | 0.0019 | 0.0090 @e4 | **stopped @ ep44** |
+
+`ctx1` (1 seed frame) forces more reliance on audio than `ctx2`. `xattn` has the
+best reconstruction (trained furthest), but `audio_gap` is not larger than the
+others — lower AR L1 is coming from the longer schedule, not from audio use. FiLM's
+large early `audio_gap` peak is the reason to extend it.
+
+## Checkpoints & weight locations
+
+All under `/scratch1/hongn/artijepa/runs/<run>/`. Each saves `latest.pt` **atomically
+every epoch** (encoder-frozen; contains predictor + state/action heads + optimizer +
+scaler + epoch) with a one-epoch-back `latest.pt.prev` backup.
+
+| Run | latest.pt (epoch) | named snapshot | config |
+|---|---|---|---|
+| `…_L9_ctx2` | ep12 | — | `configs/aai_wavlm_256_combined_L9_ctx2.yaml` |
+| `…_L9_ctx2_stateonly` | ep20 | — | `configs/aai_wavlm_256_combined_L9_ctx2_stateonly.yaml` |
+| `…_L9_ctx1_film` | **ep50** (done) | **`epoch_20.pt`** (frozen ep20 snapshot) | `…_L9_ctx1_film.yaml` (base 20ep), `…_film_e50.yaml` (→50) |
+| `…_L9_ctx1_xattn` | ep44 | — | `…_L9_ctx1_xattn.yaml` (20ep), `…_xattn_e100.yaml` (extend) |
+
+## How to run / resume
+
+Env: `source dev_artiJEPA/scripts/_env.sh` (conda `artijepa` + PYTHONPATH). Trainer:
+`python -m artijepa.aai_train --config <yaml> [--resume <ckpt>]`.
+
+```bash
+# Fresh run (from scratch / from the frozen T-SSL encoder init in the config):
+bash dev_artiJEPA/scripts/16_train_aai.sh dev_artiJEPA/configs/aai_wavlm_256_combined_L9_ctx1_film.yaml
+
+# Extend/resume as a self-resubmitting SLURM job (survives the 48h cap):
+sbatch dev_artiJEPA/scripts/resume_aai_film_e50.sbatch      # FiLM  20 -> 50  (THIS run, job 10176135)
+sbatch dev_artiJEPA/scripts/resume_aai_xattn_e100.sbatch    # xattn 20 -> 100 (currently stopped)
+
+# monitor / cancel
+squeue -u $USER
+tail -f /scratch1/hongn/artijepa/runs/aai_wavlm_256_combined_L9_ctx1_film/train_log.csv
+scancel <jobid>          # also stops the self-resubmit chain
+```
+
+To **extend epochs**, copy the base config, bump `optimization.epochs`, keep the same
+`meta.folder`, and `--resume <folder>/latest.pt` (the cosine LR re-stretches over the
+new horizon). Example: `configs/aai_wavlm_256_combined_L9_ctx1_film_e50.yaml` is the
+base FiLM config with `epochs: 20 → 50`, resumed from `latest.pt @ ep20`.
+
+---
+
+## Shared L9 base config (below tables describe the `ctx2` run; per-variant deltas: `ctx_frames`, conditioning `film`/`xattn`/state-only)
 
 ## Predictor training settings
 
@@ -75,27 +137,31 @@ never turned on).
 
 ---
 
-## Current status (2026-07-05, epoch 12 / 20)
+## Current status (2026-07-11)
 
-Reconstruction improving cleanly; `audio_gap` (shuffled−real AR L1 = "does the rollout use the
-audio") stays positive but small and noisy, peaking at epoch 7.
+Actions this session:
+- **`xattn` stopped at ep44** (`scancel` of job 10145254, which was extending it 20→100). Its
+  `latest.pt` @ ep44 is preserved; reconstruction is best-of-sweep (val_tf_l1 0.431) but
+  `audio_gap` (0.0019) is no larger than the shorter runs — the AR-L1 gain is schedule-driven,
+  not audio-driven.
+- **`film` extended 20 → 50 — COMPLETED** (job 10176135 → sacct COMPLETED 2026-07-12;
+  `resume_aai_film_e50.sbatch`, resumed `latest.pt` @ ep20; ep20 preserved as `epoch_20.pt`).
+  **Result:** reconstruction improved cleanly (val_tf_l1 0.5007 → **0.4502**, best 0.4497 @ ep43;
+  train loss 0.897 → 0.778), but `audio_gap` **did not recover** — ep21 briefly rose (0.0064 @
+  ep22) from the re-anneal then settled to a converged **0.0022** (ep45–50 mean, sd 0.0004),
+  ≈ the ep20 value (0.0015) and *below* the ep1–20 mean (0.0063, inflated by the ep2 spike).
+  **Conclusion:** FiLM's weak audio conditioning is **not schedule-limited** — longer training
+  buys latent reconstruction, not audio use. Next levers per aai_plans.md: WavLM layer sweep
+  {6,12}, `wavlm-large`, or the stronger `xattn` conditioning (resume its ep44 ckpt).
 
-| epoch | val_tf_l1 | val_ar_l1 | audio_gap |
-|---|---|---|---|
-| 1 | 0.7449 | 0.7502 | 0.0000018 |
-| 2 | 0.7078 | 0.7326 | 0.000037 |
-| 3 | 0.6532 | 0.6740 | 0.00070 |
-| 4 | 0.6261 | 0.6527 | 0.00224 |
-| 5 | 0.6057 | 0.6340 | 0.00151 |
-| 6 | 0.5840 | 0.6079 | 0.00187 |
-| 7 | 0.5696 | 0.5932 | **0.00455** ← peak |
-| 8 | 0.5517 | 0.5774 | 0.00321 |
-| 9 | 0.5368 | 0.5667 | 0.00141 |
-| 10 | 0.5267 | 0.5575 | 0.00105 |
-| 11 | 0.5203 | 0.5513 | 0.00236 |
+**Cross-variant read (WavLM-L9):** `audio_gap` is small & positive everywhere (~0.001–0.002
+at convergence), i.e. the rollout uses the audio only weakly. Best early signal = FiLM @ ep2.
+Success criterion (aai_plans.md §5.4): `audio_gap` clearly positive AND real-audio AR L1 beating
+the no-audio baseline — not yet decisively met. Remaining levers if FiLM-50 doesn't lift it:
+WavLM layer sweep {6,12}, `wavlm-large`, stronger conditioning (already testing FiLM vs xattn).
 
-**Note:** run was interrupted at ep6 (GPU-node disconnect) and resumed from the ep5 `latest.pt`;
-per-epoch checkpointing means ep6 restarted from step 0. Success criterion (aai_plans.md §5.4):
-`audio_gap` clearly positive and above the shuffled control, and real-audio AR L1 beating the
-no-audio baseline — the audio_gap is positive but not yet growing with the loss; watch ep16–20
-under the LR anneal. Planned levers if it fades: `ctx=1`, WavLM layer sweep {6,12}, `wavlm-large`.
+**FiLM `…_L9_ctx1_film` — full 50-epoch trace** (val_tf_l1 / val_ar_l1 / audio_gap):
+ep2 peak audio_gap **0.0201**; ep20 (end of base run) tf_l1 0.5007 / ar_l1 0.5357 / gap 0.00153;
+ep22 re-anneal gap bump 0.00636; ep50 (final) **tf_l1 0.4502 / ar_l1 0.4992 / gap 0.00247**
+(shuf_ar 0.5017). Converged ep45–50: tf_l1 0.4504, gap 0.00216 ± 0.0004. Full per-epoch trace in
+`diagnostics.jsonl`.

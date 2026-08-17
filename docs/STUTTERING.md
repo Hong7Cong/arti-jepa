@@ -516,6 +516,74 @@ bash scripts/21_eval_stutter_binary_dynamic.sh --probe seq_lstm   # reuses the c
 bash scripts/21_eval_stutter_binary_dynamic.sh --sample-fps native
 ```
 
+### 9.1 Dynamic × full spatial grid (`seq_attentive_lstm`) — and its OOM budget
+
+Everything above **mean-pools S′ at extraction**, which is exactly the reduction §12
+phase 2c showed destroys the rt-MRI fine-tune's gain (fixed-32f: tssl256 grid 0.817 vs
+pooled 0.785, **+0.032**; vjepa_pt −0.023). `--probe seq_attentive_lstm`
+(`--pool-mode none`) keeps the grid, so the probe gets **real temporal extent AND
+spatial detail** — the one cell the two axes never crossed. Probe: a chunked
+AttentivePooler over S′ per frame → `[B,L,D]` → packed bi-LSTM → masked mean → linear
+(the dynamic-length counterpart of `eval_disfluency`'s `attentive_lstm`).
+
+The cost is the ragged `[ΣL, S′=256, D=1024]` fp16 cache, which scales with `sample_fps`:
+
+| `sample_fps` | K/clip (p50/max) | L tokens (p50/max) | ΣL | pooled cache | **full-grid cache** |
+|---|---|---|---|---|---|
+| 25 | 2 / 7 | 32 / 112 | 127,824 | 0.24 GiB | **62.4 GiB** |
+| 50 | 3 / 13 | 48 / 208 | 225,680 | 0.43 GiB | **110.2 GiB** |
+| **native (~99)** | 6 / 25 | 96 / 400 | 417,584 | 0.80 GiB | **203.9 GiB** |
+
+At that size the cache fits neither host RAM nor page cache — the **same failure the
+phoneme Phase-2 utterance probe hit** (149 GiB spatial cache OOM'ing a 64 GB cgroup; see
+`RESULTS_phonepred.md` *Loss landscape (Phase 2)*). The full-grid path therefore reuses
+its four fixes verbatim; **all four are load-bearing, and only #2 is new work** — the
+other three are ports:
+
+1. **`madvise(MADV_DONTNEED)` on the write-side memmap.** Written pages stay resident and
+   are charged to the job's cgroup, so extraction OOMs long before 204 GiB lands.
+   Periodic `flush()` + advise-away keeps RSS flat (extraction never reads back).
+   `fadvise()` on a separate fd does **not** work here — the pages are still mapped.
+2. **Padded-token batching** (`_TokenBudget`, `probe.max_tokens` = 1024). Budget
+   `len(batch) × max(L)`, **not** `sum(L)`: `_collate_ragged` pads to the batch max, and
+   budgeting `sum()` is precisely what packed short clips beside a 400-token one and blew
+   up the phoneme run. A fixed 64-clip batch would be ~25× more memory at L=400 than at
+   L=16 — the budget keeps peak flat across that spread.
+3. **Eval loaders at `probe.eval_workers` (2) × `prefetch_factor=1`** — host RAM ≈
+   workers × prefetch × padded-batch bytes; the Jul-15 phoneme crash was 4×2 stacking.
+4. **fp16 dataset items** — the old `_RaggedDS` upcast to f32 in the worker, doubling
+   every collate and pinned transfer. Irrelevant at 200 KB/clip, 2×200 MiB/clip here.
+   The probe upcasts on the GPU instead.
+
+Plus, VRAM-side, `probe.chunk` (32) + `probe.checkpoint` gradient-checkpoint the spatial
+pool so peak activations are `O(B·chunk·S′)` not `O(B·Lmax·S′)`.
+
+**Cache-hash safety.** `_tag` hashes `mode: dyn_fullgrid` vs `dyn_spatialpool`, so the
+full-grid run gets its own directory and **every existing pooled cache/result is
+untouched** — the same discipline as the phoneme `tssl256comb215` tag split (the hash
+keys on geometry/manifest, *not* the ckpt epoch, so a shared tag would silently cache-hit
+stale features).
+
+```bash
+FPS=25 SEEDS=0 sbatch dev_artiJEPA/scripts/27_stutter_binary_dyn_fullgrid.sbatch      # 62 GiB cache
+FPS=50 SEEDS=0 sbatch dev_artiJEPA/scripts/27_stutter_binary_dyn_fullgrid.sbatch      # 110 GiB
+# per-fold split (needed for native — a single all-folds job cannot finish 7 folds in one wall):
+FPS=native SEEDS=0 FOLDS=PWS8 sbatch dev_artiJEPA/scripts/27_stutter_binary_dyn_fullgrid.sbatch
+```
+Config `configs/eval_stutter_binary_dyn_fullgrid.yaml` (encoder = combined T-SSL
+**ckpt_215**, tag `tssl256comb215`, matching the phoneme Phase-2 arm) on 1× V100-32GB.
+
+**Results (seed 0):** 25 fps **0.791**, 50 fps **0.766** — full table + reading in
+`RESULTS_stutter.md` *(Dynamic-length × full spatial grid)*. **native dropped** (see §12
+phase 2d). **RAM/wall gotcha:** `--mem` is set by loader buffers, NOT the cache — but a job
+whose working set (≈cache size) exceeds RAM thrashes anyway (cyclic random scan, LRU evicts
+each page just before reuse), so epoch cost is set by cache *residency*: 25 fps (62 GiB,
+~fits) ran 1.9 min/epoch, native (204 GiB) 14 min/epoch, and raising `--mem` 64→180 G did
+not move it. The fix for a big cache is **per-fold parallelism** (`FOLDS=<spk>`, 7 jobs
+~5 h each), not more RAM. Per-fold splits are bit-identical to the all-folds run (the LOSO
+loop consumes `rng` for every speaker; only training is skipped) and each writes its own
+`…_loso_<spk>_s0.json` — merge the 7 for the pooled metric.
+
 ---
 
 ## 10. Critical changes & decision log (binary task, 2026-07-11 → 07-12)
@@ -599,6 +667,12 @@ fixed-32f. All single-encoder, single-fps, single-seed — the scale-up below (�
 this into a proper **cross-encoder benchmark → `RESULTS_stutter.md`** (6 encoders, done).
 The full-grid `attentive` vs `pooled_attentive` gap here (0.828 vs 0.811) is exactly the
 spatial-detail question §12 phase 2c now tests across encoders + seeds.
+
+> **Read these numbers against §14, not against chance.** A no-video silence-fraction
+> baseline reaches ~0.74 macro-F1 on this task; the binary score is largely a
+> silence/duration cue (disfluent windows are 52% silent — mostly blocks), so ~0.83 does
+> not by itself demonstrate learned articulatory dynamics. See §14 for the confound
+> analysis and the honest baseline.
 
 ---
 
@@ -688,6 +762,23 @@ VRAM · #probe params · tokens/clip — all already logged; aggregate into one 
    gain lives in the spatial tokens that mean-pooling destroys. CIs + per-speaker in
    `RESULTS_stutter.md`. `scripts/23_stutter_binary_attentive.sbatch` (~31 GiB
    cache/encoder → SLURM; `SEEDS` env runs one seed/job to fit the 8h wall).
+2d. ✓ **Dynamic × full-grid `seq_attentive_lstm` DONE** (tssl256comb215, seed 0, 25 & 50 fps;
+   native **dropped**) — full table in `RESULTS_stutter.md` *(Dynamic-length × full spatial
+   grid)*. Crossed the two axes that never met (2c's grid win was fixed-32f only; §9's dynamic
+   path was spatially-pooled only). **Answers: (i) the spatial-grid win replicates on the
+   dynamic path** — @25fps full-grid 0.791 vs dynamic-pooled `seq_attentive` 0.767 (**+0.024**,
+   echoing 2c's +0.032); **(ii) higher FPS hurts** — 25→50 fps drops −0.025 (pooled 0.791→0.766),
+   and full-grid dynamic still trails the normalized **fixed-32f grid 0.817**. Sampling at real
+   rate doesn't beat spanning the event with a fixed 32f budget on this corpus. PWS8 (hardest
+   fold) drives the 50fps drop (0.653→0.574). **native (~99 fps) dropped:** with 25 > 50
+   monotone-down it would extend a declining trend, at ~14 min/epoch = ~49 h serial (past the
+   24 h wall — a single job structurally cannot finish, since results write only after all 7
+   folds); the 204 GiB cache `…_dyn_eeef2e500c/` stays on scratch and per-fold launch is wired
+   (`FOLDS=<spk>` in `scripts/27_*.sbatch`, splits verified bit-identical) if the 3rd point is
+   ever wanted. **Wall-time lesson:** epoch cost is I/O-bound on cache residency — 25fps (62 GiB,
+   ~fits RAM) ran 1.9 min/epoch, native (204 GiB) 14 min/epoch; more `--mem` did **not** help
+   (a cyclic random scan over a working set > cache thrashes under LRU regardless), so the fix
+   is per-fold parallelism, not bigger RAM.
 3. **FPS sweep** (dynamic, best encoder) {native, 25, 50, 100} → macro-F1-vs-rate curve.
 4. **Probe sweep** (best encoder × best temporal) → probe table.
 5. **Compute report** (Axis D) + an accuracy-vs-compute Pareto plot.
@@ -700,6 +791,235 @@ full-grid `attentive` path is ~31 GiB/encoder (hence SLURM for 2c).
 **Deliverables.** the auto-aggregated **`RESULTS_stutter.md`** (done); still to add:
 per-fold CIs, the full-grid-vs-pooled spatial-detail comparison, and plots (macro-F1 vs
 fps per encoder; accuracy-vs-compute Pareto). **Infra gap CLOSED** (phase 1).
+
+---
+
+## 13. Disfluency-TYPE eval (`eval_stutter_type.py`) — block / rep / pro
+
+Task 8c: not *is it disfluent* (§8, solved at ~0.81 macro-F1) but **which kind**.
+Block (silent articulatory hold), repetition (repeated gesture cycles), and
+prolongation (a held, sustained gesture) are all defined by articulator *dynamics*,
+so this is the eval that actually stresses what a video encoder buys over a
+per-frame image encoder.
+
+**Label spaces** (`data.task` / `--task`, via `stutter.label_space`):
+
+| task | classes | clips | note |
+|---|---|---|---|
+| `type3` (default) | block / rep / pro | **2007** | 96.9% of positives; globally near-balanced |
+| `type4` | + `fluent` | 3838 | detection **and** typing in one head |
+| `type5` | + `osci` / `other` | 2070 | tail classes n=42 / n=21 — macro-F1 gets noisy |
+
+**Class counts under the §7 row builder** (`tiers=[disfluency]`, 0.20–8.0 s):
+
+| Speaker | block | rep | pro | (fluent) |
+|---|---|---|---|---|
+| PWS3  | 18  | 381 | 166 | 382 |
+| PWS4  | 89  | 28  | 124 | 240 |
+| PWS5  | 139 | 65  | 56  | 266 |
+| PWS6  | 292 | 11  | 192 | 465 |
+| PWS7  | 83  | 5   | 18  | 107 |
+| PWS8  | 42  | 168 | 14  | 246 |
+| PWS10 | 30  | 36  | 50  | 125 |
+| **Total** | **693** | **694** | **620** | **1831** |
+
+Globally the three types are almost perfectly balanced (693/694/620) — but the
+**per-speaker priors are extreme**: PWS7 has 5 reps, PWS6 has 11, PWS3 has 18 blocks.
+Under LOSO that means some folds score a class on a handful of clips, so per-fold
+macro-F1 is high-variance by construction and the **pooled** number (all held-out
+clips concatenated) is the one to read. Folds missing a class entirely are logged;
+`classification_metrics` averages only the classes present.
+
+**Shared feature cache.** Type rows are a *subset* of the binary rows and their clip
+windows are identical, so `eval_stutter_type` builds rows and extracts through the
+binary eval's code with the binary label space — the cache tag is byte-identical.
+`tag=tssl256_215` @ 256px/32f/full-grid already exists
+(`feat_cache/stutter_binary/tssl256_215_b5da470386`, 3901×4096×1024 fp16, 31 GiB), so a
+default run costs **zero extraction**. A startup guard re-derives the binary labels
+from the rebuilt rows and aborts if they disagree with the cached ones (mis-alignment
+would silently scramble the type labels). Changing any of `neg_per_pos`, `build_seed`,
+`min_dur`, `max_dur`, `merge_gap`, `frames_per_clip`, `spatial_size`, `event_pad_s`
+changes the hash and forces a re-extract.
+
+**Probe checkpoints (new).** Unlike the binary eval, this one **saves the trained
+probe**: one `fold_<speaker>.pt` per fold under
+`meta.out/probes/<tag>_<probe>_<task>_<split>_s<seed>/`, holding the best-val
+`state_dict` plus everything needed to rebuild it (`probe_kwargs`, `dim`, `t_steps`,
+`classes`, val macro-F1, epoch, feature tag). Rebuild with
+`SegmentProbe(dim, num_classes, **probe_kwargs).load_state_dict(state_dict)`.
+
+Also added over the binary trainer: **per-epoch val logging** (macro-F1, kappa,
+per-class recall) and optional **`probe.patience`** early stopping — the §9 dynamic
+runs showed folds that peak by epoch ~3 and then sit at chance for 25 more epochs.
+
+```
+sbatch dev_artiJEPA/scripts/29_stutter_type3.sbatch          # type3, seeds 0 1 2
+sbatch dev_artiJEPA/scripts/29_stutter_type3.sbatch type4    # + fluent class
+```
+
+### 13.1 Results — `type3`, frozen T-SSL ckpt_215, attentive_lstm, LOSO
+
+Run 2026-07-23 (jobs 10509945 / 10516533 / 10516534, ~2 h per seed, cache hit as
+designed — zero extraction). 2007 clips, 7 folds, seeds 0/1/2.
+
+| | macro-F1 | balanced acc | accuracy | κ |
+|---|---|---|---|---|
+| **fold-mean** (mean ± sd over seeds) | **0.317 ± 0.013** | **0.423 ± 0.005** | 0.418 ± 0.026 | — |
+| **pooled** (all held-out clips) | **0.381 ± 0.025** | 0.408 ± 0.024 | 0.411 ± 0.026 | **0.110 ± 0.038** |
+| pooled, per seed (s0 / s1 / s2) | 0.400 / 0.353 / 0.389 | 0.430 / 0.382 / 0.411 | 0.435 / 0.384 / 0.414 | 0.145 / 0.069 / 0.116 |
+
+**This is barely above chance.** Balanced accuracy 0.423 against a 3-class chance of
+0.333; pooled κ = 0.11. The matched binary run on the **byte-identical cache**
+(`stutter_binary_tssl256_215_b5da470386_attentive_loso_s{0,1}`, 2 seeds) scores
+**0.830 ± 0.019** macro-F1 / bal-acc 0.831 / **κ = 0.660 ± 0.037** — same encoder,
+geometry, rows and LOSO folds, differing only in head (`attentive` vs `attentive_lstm`)
+and label space. So *whether* a segment is disfluent is decodable from these features
+and *which kind* it is essentially is not — at least not by this probe.
+
+**Pooled per-class** (mean ± sd over seeds; support is the fixed LOSO total):
+
+| class | support | precision | recall | F1 |
+|---|---|---|---|---|
+| block | 693 | 0.388 ± 0.013 | **0.722 ± 0.056** | 0.505 ± 0.024 |
+| rep   | 694 | 0.407 ± 0.133 | **0.183 ± 0.054** | 0.252 ± 0.077 |
+| pro   | 620 | 0.488 ± 0.019 | 0.318 ± 0.031 | 0.385 ± 0.024 |
+
+**The head collapses onto `block`.** Row-normalised confusion, summed over the 3 seeds
+(rows = true, columns = predicted):
+
+| true \ pred | block | rep | pro |
+|---|---|---|---|
+| **block** | 72.2% | 14.6% | 13.2% |
+| **rep**   | **65.0%** | 18.3% | 16.7% |
+| **pro**   | **54.1%** | 14.0% | 31.8% |
+
+Two thirds of repetitions and over half of prolongations are called blocks, despite
+`class_weight: balanced`. Note precision is 0.39–0.49 on all three classes — well above
+the 0.33 a uniform guesser would get — so there *is* signal; it is recall that the bias
+destroys. The balancing weights are computed on the training pool, which does not fix a
+held-out speaker whose own prior is inverted.
+
+**Per fold** (val = best in-speaker val macro-F1, mean over seeds; test = held-out):
+
+| fold | n | support (b/r/p) | val F1 | test macro-F1 | bal acc | κ |
+|---|---|---|---|---|---|---|
+| PWS10 | 116 | 30 / 36 / 50 | 0.773 | 0.414 ± 0.049 | 0.462 | 0.181 |
+| PWS7  | 106 | 83 / 5 / 18  | 0.746 | 0.405 ± 0.037 | 0.564 | 0.163 |
+| PWS4  | 241 | 89 / 28 / 124| 0.768 | 0.342 ± 0.017 | 0.373 | 0.096 |
+| PWS5  | 260 | 139 / 65 / 56| 0.803 | 0.326 ± 0.020 | 0.377 | 0.089 |
+| PWS6  | 495 | 292 / 11 / 192| 0.724 | 0.312 ± 0.038 | 0.436 | 0.067 |
+| PWS3  | 565 | 18 / 381 / 166| 0.725 | 0.310 ± 0.029 | 0.414 | 0.114 |
+| PWS8  | 224 | 42 / 168 / 14| 0.780 | **0.112 ± 0.001** | 0.335 | **0.006** |
+
+Two things to read off this table:
+
+1. **Val 0.72–0.80 vs. test 0.11–0.41 is a speaker-generalisation failure, not an
+   optimisation failure.** The probe fits held-out *clips* of a training speaker well
+   and transfers almost nothing to a held-out *speaker*. Whatever it keys on is
+   speaker-specific articulator appearance rather than the type dynamics.
+2. **PWS8 collapses completely** — 222 of 224 clips predicted `block` (confusion
+   `[[42,0,0],[166,1,1],[14,0,0]]`), identical to ±0.001 across all three seeds, κ ≈ 0.
+   PWS8 is 75% repetitions, the exact inversion of the training prior; the failure is
+   deterministic, so it is the class prior and not seed noise.
+
+The two best folds (PWS10, PWS7) are also the two smallest, consistent with §13's
+warning that per-fold macro-F1 is high-variance by construction — read the pooled row.
+
+**Not yet run:** `type4` (+ fluent) has never been launched; there is no `attentive`
+(joint pooler) or image-encoder baseline for `type3`, so this does not yet say whether
+the video encoder buys anything over a per-frame encoder *on typing*. Before spending
+more compute on encoders, the class collapse is the thing to fix — per-fold prior
+correction / logit adjustment at test time, and a per-speaker rather than pooled
+class weighting.
+
+---
+
+## 14. Discussion — what the binary 0.83 actually measures
+
+The binary probe scores 0.83 macro-F1 (§8, §11) while the same features type disfluencies
+at chance (§13.1). That gap prompted the question: **is 0.83 a phonetic confound —
+disfluent windows biased toward stop consonants (the classic stutter class), so the
+encoder reads articulatory posture rather than disfluency dynamics?** We tested it on
+the exact probe rows (`build_rows` seed 0, cache tag `b5da470386`) by aligning the
+`phones` tier (ARPABET forced-alignment; 343/476 files carry it → 2523/3901 rows, uneven
+per speaker) and measuring what each window is acoustically made of. Scripts:
+`artijepa/analyze_binary_phoneme_confound.py`, `analyze_disfluency_composition.py`;
+figures `eval/stutter_binary/phoneme_confound.png`,
+`eval/stutter_type/disfluency_composition.png`.
+
+**The confound is real, but it is silence, not consonant identity.** Phone-class
+occupancy (fraction of window-time) of disfluent vs fluent windows:
+
+| | vowel | stop | consonant (all) | **silence** |
+|---|---|---|---|---|
+| disfluent | 21% | 5% | 27% | **52%** |
+| fluent | 43% | 11% | 41% | **16%** |
+
+Disfluent windows are *less* consonant-heavy, not more — the specific hypothesis is not
+supported. A no-video LOSO classifier attributes the leakage cleanly:
+
+| no-video feature (LOSO macro-F1) | score |
+|---|---|
+| phone identity, silence removed | **0.515** (chance) |
+| silence fraction alone (1 feature) | **0.743** |
+| full phone+silence histogram | 0.767 |
+| _video encoder, same rows/protocol_ | _0.830_ |
+
+Once the silence axis is removed, phoneme identity carries nothing; a **one-feature
+silence-fraction baseline reproduces 0.74 of the 0.83**, and the full ViT stack adds only
+~0.09 on top.
+
+**Why the silence, and why it is not an alignment artifact.** A disfluency event is not a
+phoneme but a ~2.3 s stretch (vs 1.6 s fluent) of the attempted word's phones *plus* the
+dysfluent element. Composition by type shows silence tracking the behavior, not the
+aligner:
+
+| type | n | avg dur | silence | consonant | vowel |
+|---|---|---|---|---|---|
+| block (silent hold) | 572 | 2.3 s | **54%** | 21% | 21% |
+| rep (repeated attempts) | 307 | 2.2 s | 42% | 26% | 28% |
+| pro (sustained sound) | 365 | 2.1 s | **25%** | 44% | 26% |
+| fluent (negative) | 1245 | 1.6 s | 15% | 41% | 43% |
+
+Blocks are silent articulatory holds (postured for the target, no airflow, 0.9–1.6 s);
+repetitions add inter-attempt pauses. If the `<sil>` were the forced aligner failing on
+non-canonical stuttered speech, prolongations — the most non-canonical, sustained speech —
+would be the *most* silent; they are the **least** (25%), because a prolongation is
+sustained sound. So the silence is genuine held/paused articulation.
+
+**Reconciling with §4 (consonant-dominated onset prefixes).** No contradiction: §4 counts
+the *annotator's target phoneme* — the sound the speaker is stuck on — which is
+consonant-heavy, matching the stuttering literature. §14 measures the *acoustic
+realization* of blocking on that target, which is silence (a held posture makes no
+sound). Target = consonant; realization = silence. On rt-MRI the encoder most plausibly
+reads the **frozen consonant-shaped posture during the silent hold** — which is a real
+articulatory correlate of disfluency, not a nuisance to be removed.
+
+**Implications.**
+- **0.83 is a genuine correlate but a shallow one.** It is largely a silence/duration cue;
+  it does *not* by itself demonstrate learned articulatory *dynamics*. The §8 headline
+  ("video encoders 0.78–0.81, per-frame image encoders collapse to ~0.53") still holds —
+  a per-frame encoder cannot see silence duration or a sustained hold either — but the
+  achievable ceiling on this task is set by a very simple feature, and future claims
+  should be made against a **silence-fraction / VAD baseline (~0.74)**, not against 0.50.
+- **Prediction: prolongations are the hardest disfluency for the binary probe.** They sit
+  at 25% silence, barely above fluent's 15%, so the silence shortcut mostly misses them.
+  Testable directly by scoring binary recall per disfluency type.
+- **This is why typing collapses (§13.1).** block/rep/pro are *all* disfluent, so the
+  silence cue that carries binary detection cannot separate them; the probe falls back on
+  the majority (`block`) and lands near chance.
+- **The consonant intuition survives only inside prolongations** — the one type more
+  consonant-heavy than fluent (44% vs 41%): what you sustain is usually a fricative/nasal.
+
+**Caveats.** Phone coverage is 65% of rows and uneven per speaker (PWS3 26%, PWS5/PWS7
+100%); the interview recordings lack a `phones` tier. The no-video classifier is a linear
+model on coarse 8-class histograms — a *lower bound* on phonetic leakage, but the
+silence-only vs identity-only split is the clean attribution.
+
+**Two concrete follow-ups.** (1) Add a silence-fraction / VAD baseline row to
+`RESULTS_stutter.md` as the honest floor the encoder must beat. (2) Rebuild negatives to
+be **duration-and-silence-matched** (draw fluent windows with matched pause content) to
+isolate whether the encoder sees anything beyond silence.
 
 ---
 

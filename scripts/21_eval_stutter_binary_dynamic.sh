@@ -6,6 +6,10 @@
 #   bash scripts/21_eval_stutter_binary_dynamic.sh                          # seq_attentive, 25 fps
 #   bash scripts/21_eval_stutter_binary_dynamic.sh --probe seq_lstm
 #   bash scripts/21_eval_stutter_binary_dynamic.sh --sample-fps native
+#   # parallel key: run the FINAL epoch-215 checkpoint under its own tag (own cache; the
+#   # config default stays ckpt_100 -> tag tssl256, existing rows/caches untouched):
+#   bash scripts/21_eval_stutter_binary_dynamic.sh \
+#       --checkpoint /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_215.pt --tag tssl256_215
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${HERE}/_env.sh"

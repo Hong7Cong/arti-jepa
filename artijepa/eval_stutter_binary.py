@@ -36,6 +36,9 @@ Run:
         --config dev_artiJEPA/configs/eval_stutter_binary.yaml
     # override the checkpoint / split from the CLI:
     ... --checkpoint /data1/hongn/arti-jepa/tssl_vitl_256_combined/ckpt_100.pt --tag tssl256
+    # parallel key -- FINAL epoch-215 checkpoint under its own tag (own feature cache; the
+    # config default stays ckpt_100/tag tssl256, so existing caches + results are untouched):
+    ... --checkpoint /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_215.pt --tag tssl256_215
     ... --split loso            # (default) leave-one-speaker-out over the 7 PWS
     ... --split fixed --test-speaker PWS10 --val-speaker PWS7
 """
@@ -52,7 +55,7 @@ import yaml
 
 from artijepa import stutter as S
 from artijepa import stutter_binary as SB
-from artijepa.checkpoint import filtered_load
+from artijepa.checkpoint import clean_backbone_key, filtered_load, resolve_checkpoint
 from artijepa.model import build_models
 # Reuse the exact probe / training machinery from the disfluency-type eval so the
 # two evals stay byte-identical where they overlap (probe, class weights, folds).
@@ -91,28 +94,85 @@ def _worker_init(_wid):
 
 
 # --------------------------------------------------------------------------- #
-# frozen encoder (T-SSL / V-JEPA2 256px checkpoint) -- loaded like demo.ipynb
+# frozen encoder -- multi-encoder dispatch (docs/STUTTERING.md §12 phase 1)
 # --------------------------------------------------------------------------- #
+# Every encoder object exposes ``.backbone(clip)`` returning the FULL temporal-major
+# token grid ``[B, T'*S', D]`` (``pool_spatial=False``); ``extract`` then reduces that
+# grid itself via ``pool_mode`` (none/spatial/all). This mirrors the multi-encoder
+# ``load_frozen_encoder`` in ``eval_disfluency.py`` so the two evals stay identical on
+# encoder handling -- but on the OpenCV ``stutter_binary`` loader (pal8-safe), not the
+# decord loader that reads this corpus as all-black frames (see the doc's decoder bug).
+#
+# Supported ``encoder.type``:
+#   vjepa (default) -- Arti-JEPA / V-JEPA2 ViT-L. ``spec``/``checkpoint``:
+#       * "pretrained" (or a bare model_name) -> FAIR V-JEPA2 weights via
+#         resolve_checkpoint, loaded onto ``encoder.backbone`` with clean_backbone_key.
+#       * a local .pt path -> the T-SSL fine-tune, loaded onto the full ``encoder``
+#         (its keys are already ``backbone.*``), like examples/demo.ipynb.
+#   videomae        -- MCG-NJU VideoMAE-L (HF) or a local rt-MRI repo ``.pth`` via
+#                      ``videomae_checkpoint`` (224px/16f/tubelet2, minmax norm).
+#   image_baseline  -- a timm 2-D encoder (``model``: vitl|dinov2|clip|siglip|resnet)
+#                      applied per frame, tubelet-pooled over time (minmax norm).
 def load_frozen_encoder(cfg, device):
-    """Build the ViT-L encoder at the checkpoint's geometry and load EMA weights.
-
-    Mirrors ``examples/demo.ipynb``: build at 256px / 32f / tubelet 2 / patch 16,
-    then ``filtered_load`` the ``target_encoder`` (EMA) state -- its keys are already
-    ``backbone.*`` so they map onto the ``MultiSeqWrapper`` directly.
-    """
     d, ec = cfg["data"], cfg["encoder"]
+    etype = ec.get("type", "vjepa")
+
+    if etype == "videomae":
+        from artijepa.videomae_baseline import VideoMAEEncoder, DEFAULT_VIDEOMAE
+        enc = VideoMAEEncoder(ec.get("videomae_name", DEFAULT_VIDEOMAE),
+                              frame_batch=ec.get("frame_batch", 8),
+                              pool_spatial=False, grid_cap=ec.get("grid_cap", 16),
+                              checkpoint=ec.get("videomae_checkpoint")).to(device).eval()
+        # feed clips at VideoMAE's native geometry (it resamples T->16 internally,
+        # but set frames/tubelet so extract's Tp = num_frames//tubelet is correct)
+        d["spatial_size"] = enc.backbone.input_size
+        d["frames_per_clip"] = enc.backbone.num_frames
+        d["tubelet_size"] = enc.backbone.tubelet
+        d["intensity_norm"] = "minmax"; d.pop("grayscale_stats", None)
+        ec["spec"] = enc.backbone.name
+        print(f"[bin-eval] videomae {enc.backbone.name} D={enc.backbone.embed_dim} "
+              f"frames={enc.backbone.num_frames} input={enc.backbone.input_size}")
+        return enc
+
+    if etype == "image_baseline":
+        from artijepa.baselines import BaselineEncoder
+        enc = BaselineEncoder(ec["model"], tubelet_size=d.get("tubelet_size", 2),
+                              frame_batch=ec.get("frame_batch", 64),
+                              pool_spatial=False, grid_cap=ec.get("grid_cap", 16)).to(device).eval()
+        d["spatial_size"] = enc.backbone.input_size
+        d["intensity_norm"] = "minmax"; d.pop("grayscale_stats", None)
+        ec["spec"] = enc.backbone.name
+        print(f"[bin-eval] image-baseline {enc.backbone.name} D={enc.backbone.embed_dim} "
+              f"input={enc.backbone.input_size}")
+        return enc
+
+    # --- V-JEPA / Arti-JEPA T-SSL ViT-L (build at the config geometry) ---
     encoder, _ = build_models(
         device=device, model_name=ec.get("model_name", "vit_large"),
         spatial_size=d["spatial_size"], frames_per_clip=d["frames_per_clip"],
         patch_size=d.get("patch_size", 16), tubelet_size=d.get("tubelet_size", 2),
         num_mask_tokens=1, use_activation_checkpointing=False)
-    ckpt = torch.load(ec["checkpoint"], map_location="cpu", weights_only=False)
-    key = ec.get("key", "target_encoder")
-    if key not in ckpt:
-        key = next(k for k in ("target_encoder", "encoder", "ema_encoder") if k in ckpt)
-    n, miss, skip = filtered_load(encoder, ckpt[key])
-    print(f"[bin-eval] encoder<-{os.path.basename(ec['checkpoint'])}:{key} "
-          f"loaded {n} miss {len(miss)} skip {len(skip)} (epoch {ckpt.get('epoch','?')})")
+    spec = ec.get("spec", ec.get("checkpoint"))
+    if spec in (None, "pretrained"):
+        ckpt = torch.load(resolve_checkpoint(ec.get("model_name", "vit_large"),
+                                             ec.get("checkpoint")),
+                          map_location="cpu", weights_only=False)
+        key = ec.get("key", "target_encoder")
+        if key not in ckpt:
+            key = next(k for k in ("target_encoder", "encoder", "ema_encoder") if k in ckpt)
+        n, miss, skip = filtered_load(encoder.backbone, clean_backbone_key(ckpt[key]))
+        ec["spec"] = "pretrained"
+        print(f"[bin-eval] encoder<-pretrained:{key} loaded {n} miss {len(miss)} skip {len(skip)}")
+    else:
+        ckpt = torch.load(spec, map_location="cpu", weights_only=False)
+        key = ec.get("key", "target_encoder")
+        if key == "auto":
+            key = "target_encoder" if "target_encoder" in ckpt else "encoder"
+        if key not in ckpt:
+            key = next(k for k in ("target_encoder", "encoder", "ema_encoder") if k in ckpt)
+        n, miss, skip = filtered_load(encoder, ckpt[key])
+        print(f"[bin-eval] encoder<-{os.path.basename(str(spec))}:{key} "
+              f"loaded {n} miss {len(miss)} skip {len(skip)} (epoch {ckpt.get('epoch','?')})")
     encoder.eval()
     for p in encoder.parameters():
         p.requires_grad = False
@@ -132,13 +192,26 @@ def build_rows(cfg):
     return rows, stats
 
 
+def _enc_id(ec):
+    """A stable identity string for whichever encoder is configured (checkpoint path,
+    pretrained tag, VideoMAE name/ckpt, or image-baseline alias)."""
+    etype = ec.get("type", "vjepa")
+    if etype == "videomae":
+        return f"videomae:{ec.get('videomae_checkpoint') or ec.get('videomae_name') or 'large'}"
+    if etype == "image_baseline":
+        return f"image_baseline:{ec.get('model')}"
+    return f"vjepa:{ec.get('spec') or ec.get('checkpoint') or 'pretrained'}"
+
+
 def _tag(cfg):
-    """A content hash so different geometries / row-builds get distinct caches."""
+    """A content hash so different encoders / geometries / row-builds get distinct caches."""
     d, ec = cfg["data"], cfg["encoder"]
     pm = d.get("pool_mode", "none")
-    hd = {"ckpt": ec["checkpoint"], "key": ec.get("key", "target_encoder"),
+    etype = ec.get("type", "vjepa")
+    hd = {"enc": _enc_id(ec), "etype": etype, "key": ec.get("key", "target_encoder"),
           "sz": d["spatial_size"], "fpc": d["frames_per_clip"],
           "tub": d.get("tubelet_size", 2), "pad": d.get("event_pad_s", 0.0),
+          "grid_cap": ec.get("grid_cap", 16),
           "pool_spatial": pm == "all",     # kept for hash-compat with earlier caches
           "neg_per_pos": d.get("neg_per_pos", 1.0), "build_seed": d.get("build_seed", 0),
           "tiers": d.get("tiers", ["disfluency"]), "min_dur": d.get("min_dur", 0.20),
@@ -146,7 +219,10 @@ def _tag(cfg):
     if pm == "spatial":                    # new mode -> distinct cache; leaves none/all hashes intact
         hd["pool_mode"] = "spatial"
     h = hashlib.sha1(json.dumps(hd, sort_keys=True).encode()).hexdigest()[:10]
-    tag = cfg["meta"].get("tag") or os.path.basename(os.path.dirname(ec["checkpoint"]))
+    tag = cfg["meta"].get("tag")
+    if not tag:
+        ckpt = ec.get("checkpoint")
+        tag = os.path.basename(os.path.dirname(ckpt)) if ckpt else etype
     return f"{tag}_{h}"
 
 
@@ -235,15 +311,20 @@ def run(cfg):
     print(f"[bin-eval] frozen binary | classes={classes} probe={ptype} "
           f"pool_mode={cfg['data']['pool_mode']} device={device}")
 
-    gs = cfg["data"].get("grayscale_stats")
-    if gs and os.path.exists(gs):
-        print(f"[bin-eval] grayscale stats <- {gs}")
-    else:
-        print(f"[bin-eval] grayscale stats {gs!r} absent -> global channel-norm "
-              f"defaults to mean=0/std=1 (per-clip z-score still applied)")
-
     rows, row_stats = build_rows(cfg)
-    encoder = load_frozen_encoder(cfg, device)
+    encoder = load_frozen_encoder(cfg, device)      # may mutate geometry + intensity_norm
+    # report the ACTUAL normalization the loader will use (baselines/videomae switch
+    # to minmax and drop grayscale_stats inside load_frozen_encoder)
+    norm = cfg["data"].get("intensity_norm", "zscore")
+    gs = cfg["data"].get("grayscale_stats")
+    if norm == "zscore" and gs and os.path.exists(gs):
+        print(f"[bin-eval] intensity_norm=zscore; grayscale stats <- {gs}")
+    elif norm == "zscore":
+        print(f"[bin-eval] intensity_norm=zscore; grayscale stats {gs!r} absent -> "
+              f"global channel-norm defaults to mean=0/std=1 (per-clip z-score still applied)")
+    else:
+        print(f"[bin-eval] intensity_norm={norm} (encoder applies its own mean/std)")
+
     feats, y, speakers = extract(encoder, cfg, rows, device, dtype)
     del encoder; torch.cuda.empty_cache()
 
@@ -259,6 +340,30 @@ def run(cfg):
     folds, all_true, all_pred, all_spk = [], [], [], []
     yfull = y                                          # feats rows align 1:1 with y
 
+    # ``meta.save_probe`` (--save-probe) swaps in eval_stutter_type.train_probe_ckpt:
+    # the SAME optimisation (AdamW, warmup+cosine, best-val model selection) that also
+    # writes the best-val state_dict + everything needed to rebuild the probe to
+    # ``meta.out/probes/<feature-tag>_<probe>_binary_<split>_s<seed>/fold_<spk>.pt``.
+    # Imported lazily: eval_stutter_type imports THIS module (row builder / extract),
+    # so a top-level import would be circular.
+    save_probe = bool(meta.get("save_probe"))
+    ckpt_dir = None
+    if save_probe:
+        from artijepa.eval_stutter_type import train_probe_ckpt
+        cfg["data"].setdefault("task", "binary")   # recorded in the .pt metadata only
+        ckpt_dir = os.path.join(meta["out"], "probes",
+                                f"{_tag(cfg)}_{ptype}_binary_{split_mode}_s{seed}")
+        print(f"[bin-eval] probe weights -> {ckpt_dir}/fold_<speaker>.pt")
+
+    def _train(tr, va, te, name):
+        """-> (test_metrics, test_pred, best_val_f1, extra fold fields)."""
+        if save_probe:
+            tm, pred, vf1, cp = train_probe_ckpt(cfg, feats, yfull, tr, va, te, name,
+                                                 device, classes, ckpt_dir)
+            return tm, pred, vf1, {"probe_ckpt": cp}
+        tm, pred, vf1 = train_probe(cfg, feats, yfull, tr, va, te, name, device, classes)
+        return tm, pred, vf1, {}
+
     if split_mode == "loso":
         for test_spk in uniq_spk:
             te = keep[spk == test_spk]
@@ -267,10 +372,9 @@ def run(cfg):
                 print(f"[bin-eval] skip fold {test_spk}: degenerate")
                 continue
             tr, va = _val_split(tr_all, yfull, len(classes), val_frac, rng)
-            tm, pred, vf1 = train_probe(cfg, feats, yfull, tr, va, te, test_spk,
-                                        device, classes)
+            tm, pred, vf1, extra = _train(tr, va, te, test_spk)
             folds.append({"speaker": test_spk, "n_test": int(len(te)),
-                          "val_f1": round(vf1, 4), **tm})
+                          "val_f1": round(vf1, 4), **extra, **tm})
             all_true += yfull[te].tolist(); all_pred += pred.tolist()
             all_spk += [test_spk] * len(te)
     elif split_mode == "fixed":
@@ -286,27 +390,27 @@ def run(cfg):
         print(f"[bin-eval] fixed split: train={len(tr)} "
               f"(speakers {sorted({speakers[int(i)] for i in tr})}) "
               f"val={len(va)} ({val_spk}) test={len(te)} ({test_spk})")
-        tm, pred, vf1 = train_probe(cfg, feats, yfull, tr, va, te, test_spk, device, classes)
+        tm, pred, vf1, extra = _train(tr, va, te, test_spk)
         folds.append({"speaker": test_spk, "val_speaker": val_spk,
-                      "n_test": int(len(te)), "val_f1": round(vf1, 4), **tm})
+                      "n_test": int(len(te)), "val_f1": round(vf1, 4), **extra, **tm})
         all_true += yfull[te].tolist(); all_pred += pred.tolist()
         all_spk += [test_spk] * len(te)
     else:  # random stratified 60/20/20
         perm = keep.copy(); rng.shuffle(perm)
         n = len(perm); te = perm[: int(0.2 * n)]; rest = perm[int(0.2 * n):]
         tr, va = _val_split(rest, yfull, len(classes), val_frac, rng)
-        tm, pred, vf1 = train_probe(cfg, feats, yfull, tr, va, te, "random",
-                                    device, classes)
+        tm, pred, vf1, extra = _train(tr, va, te, "random")
         folds.append({"speaker": "random", "n_test": int(len(te)),
-                      "val_f1": round(vf1, 4), **tm})
+                      "val_f1": round(vf1, 4), **extra, **tm})
         all_true += yfull[te].tolist(); all_pred += pred.tolist()
 
     if not folds:
         raise SystemExit("[bin-eval] no usable folds")
     pooled = S.classification_metrics(np.asarray(all_true), np.asarray(all_pred),
                                       len(classes), classes)
-    out = {"encoder": cfg["encoder"]["checkpoint"], "type": "vjepa", "mode": "frozen",
-           "task": "binary", "classes": classes,
+    ec = cfg["encoder"]
+    out = {"encoder": _enc_id(ec), "type": ec.get("type", "vjepa"), "mode": "frozen",
+           "tag": cfg["meta"].get("tag"), "task": "binary", "classes": classes,
            "probe": cfg["probe"].get("type", "attentive"),
            "spatial_size": cfg["data"]["spatial_size"],
            "frames_per_clip": cfg["data"]["frames_per_clip"], "seed": seed,
@@ -337,6 +441,19 @@ def _report(cfg, out):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", required=True)
+    # --- encoder selection (docs/STUTTERING.md §12 multi-encoder sweep) ---
+    ap.add_argument("--enc-type", default=None,
+                    choices=["vjepa", "videomae", "image_baseline"],
+                    help="encoder family (default from config; 'vjepa' = Arti-JEPA/V-JEPA2 ViT-L)")
+    ap.add_argument("--model", default=None,
+                    help="image_baseline alias: vitl | dinov2 | clip | siglip | resnet")
+    ap.add_argument("--spec", default=None,
+                    help="vjepa: 'pretrained' (FAIR V-JEPA2) or a local .pt path (T-SSL)")
+    ap.add_argument("--videomae-name", default=None, help="HF VideoMAE repo id")
+    ap.add_argument("--videomae-checkpoint", default=None,
+                    help="local rt-MRI VideoMAE repo .pth (e.g. checkpoint-214.pth)")
+    ap.add_argument("--grid-cap", type=int, default=None,
+                    help="cap the spatial grid side for videomae/image_baseline (default 16)")
     ap.add_argument("--checkpoint", default=None, help="T-SSL/V-JEPA checkpoint (.pt)")
     ap.add_argument("--key", default=None, help="state-dict key (default target_encoder)")
     ap.add_argument("--probe", default=None,
@@ -359,8 +476,24 @@ def main():
                     help="main-process intra-op threads; default 2")
     ap.add_argument("--tag", default=None)
     ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--save-probe", action="store_true",
+                    help="save the best-val probe weights per LOSO fold under "
+                         "meta.out/probes/<tag>_<probe>_binary_<split>_s<seed>/")
     args = ap.parse_args()
     cfg = load_config(args.config)
+    if args.enc_type is not None:
+        cfg["encoder"]["type"] = args.enc_type
+    if args.model is not None:
+        cfg["encoder"]["type"] = "image_baseline"; cfg["encoder"]["model"] = args.model
+    if args.spec is not None:
+        cfg["encoder"]["type"] = "vjepa"; cfg["encoder"]["spec"] = args.spec
+    if args.videomae_name is not None:
+        cfg["encoder"]["type"] = "videomae"; cfg["encoder"]["videomae_name"] = args.videomae_name
+    if args.videomae_checkpoint is not None:
+        cfg["encoder"]["type"] = "videomae"
+        cfg["encoder"]["videomae_checkpoint"] = args.videomae_checkpoint
+    if args.grid_cap is not None:
+        cfg["encoder"]["grid_cap"] = args.grid_cap
     if args.checkpoint is not None:
         cfg["encoder"]["checkpoint"] = args.checkpoint
     if args.key is not None:
@@ -395,6 +528,8 @@ def main():
         cfg["meta"]["tag"] = args.tag
     if args.seed is not None:
         cfg["meta"]["seed"] = args.seed
+    if args.save_probe:
+        cfg["meta"]["save_probe"] = True
     run(cfg)
 
 

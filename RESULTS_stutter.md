@@ -96,3 +96,154 @@ Per held-out speaker (macro-F1, mean ± std over 3 seeds):
 | PWS10 | 0.822 ± 0.013 | 0.811 | 0.812 ± 0.012 | 0.827 |
 
 _(tssl256's grid gains concentrate on PWS3/5/8/6/10; vjepa_pt's grid losses concentrate on the hard speakers it used to win under pooling — PWS4 0.793→0.744, PWS8 0.700→0.647.)_
+
+### VideoMAE arm — does the spatial-detail dissociation replicate in a second encoder family?
+
+Same full-grid `attentive` protocol (LOSO, duration-matched negatives `build_seed 0`, balanced
+CE, 3 seeds), run on the two VideoMAE encoders so the **Kinetics-SSL vs rt-MRI-continue-
+pretrain** contrast can be read the same way as the V-JEPA2 **pretrained vs rt-MRI-fine-tune**
+contrast above. Ran as `scripts/29_stutter_binary_attentive_videomae.sbatch` (one job per
+encoder, 3 seeds serial; ~10 min extraction + ~1 h/seed).
+
+> **Geometry is NOT matched to the JEPA arm — read the Δ, not the absolute level.** VideoMAE-L
+> is a fixed 16-frame/224px model: `load_frozen_encoder` pins `frames_per_clip=16`,
+> `spatial_size=224`, `minmax` norm, and the HF backbone resamples any longer input down to 16
+> frames, so `--frames 32` is silently overridden. Grid = **T′8 × S′196 = 1568 tokens** vs the
+> JEPA arm's T′16 × S′256 = 4096. Both clips still *span* the same event window (the loader
+> samples its frame budget uniformly across the event), so temporal **coverage** is matched but
+> temporal **resolution** is half. Cross-family absolute comparisons inherit that confound; the
+> within-family grid-vs-pooled Δ does not.
+
+| Encoder | full-grid `attentive` (mean ± std) | per-seed | `pooled_attentive` | **Δ grid − pooled** |
+|---|---|---|---|---|
+| VideoMAE-L (rt-MRI continue-pretrain, ckpt-214) | **0.807 ± 0.007** | 0.804, 0.817, 0.800 | 0.806 | **+0.001** |
+| VideoMAE-L (Kinetics SSL) | **0.790 ± 0.003** | 0.795, 0.787, 0.787 | 0.801 | **−0.011** |
+
+_(pooled_attentive column is **seed 0 only** — the 3-seed CIs above were run for tssl256/vjepa_pt
+only — so each Δ is a 3-seed mean against a single-seed point, not a matched-CI difference.)_
+
+Per held-out speaker (macro-F1, mean ± std over 3 seeds):
+
+| speaker | videomae_tssl grid | videomae_pt grid |
+|---|---|---|
+| PWS3  | 0.789 ± 0.037 | 0.737 ± 0.023 |
+| PWS4  | 0.677 ± 0.031 | 0.781 ± 0.014 |
+| PWS5  | 0.861 ± 0.012 | 0.872 ± 0.020 |
+| PWS6  | 0.880 ± 0.011 | 0.841 ± 0.007 |
+| PWS7  | 0.845 ± 0.015 | 0.855 ± 0.000 |
+| PWS8  | 0.718 ± 0.023 | 0.666 ± 0.009 |
+| PWS10 | 0.808 ± 0.033 | 0.803 ± 0.029 |
+
+**The dissociation replicates in sign, but is ~4× weaker.** The rt-MRI arm gains on the grid
+relative to the generic-pretrained arm in both families — the grid-vs-pooled **swing** (Δ_rtMRI −
+Δ_generic) is **+0.012** here (+0.001 vs −0.011) against **+0.055** for V-JEPA2 (+0.032 vs
+−0.023). And the ranking **does not flip**: videomae_tssl already led videomae_pt under pooling
+(0.806 vs 0.801) and still leads under the grid (0.807 vs 0.790, **+0.018**), where for V-JEPA2
+the grid reversed the order. So "rt-MRI pretraining puts articulatory signal into spatial tokens
+that mean-pooling destroys" is directionally reproduced in a second architecture, but the effect
+is much smaller — and with 1568 tokens vs 4096, part of that attenuation may simply be that
+there is less spatial-temporal structure left to attend over. **Not a clean replication; treat
+as suggestive.**
+
+Per-speaker, the two families disagree about *which* speakers the rt-MRI variant helps:
+videomae_tssl wins PWS8 (+0.052), PWS6 (+0.039) and PWS3 (+0.052) but loses PWS4 badly
+(−0.104), while in the JEPA arm the rt-MRI encoder's grid gains concentrated on PWS3/5/6/8/10.
+PWS8 (hardest fold) improving under rt-MRI pretraining is the one consistent cross-family signal.
+
+_3 seeds/encoder, features extracted once per encoder (`pool_mode=none`, `(3901, 1568, 1024)`
+fp16 ≈ 11.4 GiB) and reused across seeds. Best-val probe weights saved per fold under
+`eval/stutter_binary/probes/<feature-tag>_attentive_binary_loso_s<seed>/fold_<PWS>.pt`
+(`--save-probe`), 42 checkpoints total._
+
+## Dynamic-length × full spatial grid — `seq_attentive_lstm` (tssl256comb215, seed 0)
+
+Crosses the two axes that never met before: the spatial-detail win above was **fixed-32f
+only**, and the dynamic-length path (docs/STUTTERING.md §9) was **spatially-pooled only**.
+`seq_attentive_lstm` keeps the S′=256 grid **and** samples each event at a target FPS so
+its temporal extent tracks real duration — a chunked AttentivePooler over S′ per frame →
+packed bi-LSTM → masked mean. Frozen combined T-SSL **ckpt_215** (tag `tssl256comb215`),
+same LOSO / duration-matched negatives / balanced-CE protocol; features extracted once per
+FPS (ragged `[ΣL, S′, D]` fp16 cache) with the phoneme-Phase-2 OOM fixes (§9.1). Compare
+the dynamic spatially-pooled rows (`seq_attentive` 0.767 / `seq_lstm` 0.744, 25 fps) and
+the fixed-32f grid `attentive` (0.817 ± .009, above).
+
+| sample_fps | cache | pooled macro-F1 | bal-acc | κ | disfl F1 | flu F1 | mean-fold F1 |
+|---|---|---|---|---|---|---|---|
+| **25** | 62 GiB | **0.791** | 0.794 | 0.584 | 0.79 | 0.79 | 0.802 |
+| **50** | 110 GiB | **0.766** | 0.766 | 0.532 | 0.78 | 0.75 | 0.772 |
+| ~~native (~99)~~ | 204 GiB | _dropped_ | — | — | — | — | — |
+
+Per held-out speaker (macro-F1, LOSO):
+
+| sample_fps | PWS3 | PWS4 | PWS5 | PWS6 | PWS7 | PWS8 | PWS10 |
+|---|---|---|---|---|---|---|---|
+| 25 | 0.663 | 0.788 | 0.872 | 0.894 | 0.925 | 0.653 | 0.819 |
+| 50 | 0.735 | 0.789 | 0.768 | 0.817 | 0.906 | 0.574 | 0.818 |
+
+**Findings.**
+- **Keeping the spatial grid replicates on the dynamic path.** Dynamic full-grid @25fps
+  (0.791) beats dynamic spatially-pooled `seq_attentive` (0.767) by **+0.024** — same sign
+  and comparable magnitude to the fixed-32f grid-over-pooled gain (**+0.032**). §12 phase 2c
+  was not an artifact of the fixed-length parameterization; the rt-MRI fine-tune's spatial
+  signal survives a variable-length temporal view.
+- **But higher FPS *hurts*: 25 → 50 drops −0.025** (pooled), and the dynamic full-grid view
+  (0.791 @25fps) still trails the **normalized fixed-32f grid** (0.817). Sampling each event
+  at its real rate — more frames for longer events — does not beat spanning the event with a
+  fixed 32-frame budget on this corpus, consistent with the §9 dynamic-vs-fixed reading. The
+  FPS trend is monotone-down over the two measured points.
+- **The decline is one speaker.** PWS8 (the hardest fold) falls 0.653 → 0.574 from 25→50 fps
+  while the other six folds barely move; PWS8 is a large fold so it drives the pooled drop.
+- **native (~99 fps) dropped.** With 25 > 50 monotone-down, native (204 GiB cache, ~14 min/
+  epoch = ~49 h serial past the 24 h wall) would extend a declining trend rather than reveal
+  a win, so it was not completed. Two points establish the FPS direction. (The 204 GiB
+  feature cache `…/tssl256comb215_dyn_eeef2e500c/` remains on scratch if the third point is
+  ever wanted; per-fold launch is wired — `FOLDS=<spk>` in `scripts/27_*.sbatch`.)
+
+_Seed 0 only (frozen features are seed-independent; the fixed-32f grid CIs above are 3-seed
+means, so cross-parameterization deltas are single-seed vs 3-seed). Encoder is ckpt_215; the
+published fixed-32f grid rows are ckpt_100 (`tssl256`) — phoneme cross-domain found
+ckpt_215 ≈ ckpt_100 (+0.015), so comparable but not a matched-checkpoint comparison._
+
+## Disfluency-TYPE — `type3` block / rep / pro (Task 8c, 3 seeds)
+
+A **different task** from everything above: not *is this segment disfluent* but *which
+kind*. Frozen combined T-SSL **ckpt_215** (tag `tssl256_215`) @ 256px/32f full grid →
+`attentive_lstm`, same LOSO / row-builder / balanced-CE protocol, 2007 clips (the
+disfluent subset of the 3901 binary rows — cache is shared and byte-identical).
+Run 2026-07-23, seeds 0/1/2. Full analysis: **docs/STUTTERING.md §13.1**.
+
+| | macro-F1 | bal-acc | acc | κ |
+|---|---|---|---|---|
+| **fold-mean** (mean ± sd over seeds) | **0.317 ± 0.013** | 0.423 ± 0.005 | 0.418 ± 0.026 | — |
+| **pooled** (all held-out clips) | **0.381 ± 0.025** | 0.408 ± 0.024 | 0.411 ± 0.026 | **0.110 ± 0.038** |
+| _binary on the **same cache**, for scale (2 seeds, `attentive`)_ | _0.830 ± 0.019_ | _0.831 ± 0.019_ | _0.831 ± 0.019_ | _0.660 ± 0.037_ |
+
+Per held-out speaker (test macro-F1, mean ± sd over 3 seeds):
+
+| PWS3 | PWS4 | PWS5 | PWS6 | PWS7 | PWS8 | PWS10 |
+|---|---|---|---|---|---|---|
+| 0.310 ± .029 | 0.342 ± .017 | 0.326 ± .020 | 0.312 ± .038 | 0.405 ± .037 | **0.112 ± .001** | 0.414 ± .049 |
+
+**Findings.**
+- **Typing is near chance where detection is solved.** Balanced accuracy 0.423 against a
+  3-class chance of 0.333, pooled κ = 0.11 — on the *byte-identical feature cache*
+  (`tssl256_215_b5da470386`) that gives 0.830 ± 0.019 macro-F1 / κ = 0.66 on binary.
+  Same encoder, same geometry, same rows, same LOSO; only the head and label space
+  differ (binary used `attentive`, type3 `attentive_lstm`). Disfluent-vs-fluent is
+  decodable from these features; block-vs-rep-vs-pro essentially is not, by this probe.
+- **The head collapses onto `block`** despite `class_weight: balanced`: recall is 0.72
+  block / 0.18 rep / 0.32 pro, and 65% of reps and 54% of pros are predicted block.
+  Per-class *precision* is 0.39–0.49 across all three, so signal exists — the class bias
+  is destroying recall, and the weights are computed on the training pool, which cannot
+  fix a held-out speaker whose own prior is inverted.
+- **Val 0.72–0.80 vs test 0.11–0.41 = speaker-generalization failure, not underfitting.**
+  The probe fits held-out clips of a *training* speaker well and transfers almost nothing
+  to a held-out *speaker*.
+- **PWS8 collapses outright** — 222/224 clips predicted block, κ ≈ 0.006, identical to
+  ±0.001 across all three seeds. PWS8 is 75% repetitions, the exact inversion of the
+  training prior; the determinism across seeds marks this as the class prior, not noise.
+
+_No `type4` (+fluent), no `attentive` (joint-pooler) arm, and no image-encoder baseline
+for `type3` yet — so this does **not** yet establish whether video modeling buys anything
+over a per-frame encoder on typing, the way it decisively does on binary. The class
+collapse should be fixed first (test-time logit adjustment / per-speaker weighting)._

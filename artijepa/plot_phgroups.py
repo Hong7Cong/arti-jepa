@@ -63,7 +63,7 @@ def task_colors(task, names):
 
     `consonants` has 25 classes -- more than tab20 holds -- so it spills into
     tab20b rather than wrapping (a wrap would give 5 pairs of identical colors)."""
-    if task in ("manner", "place"):
+    if task in ("manner", "place", "vowcons"):
         pal = [plt.get_cmap("tab10")(i) for i in range(10)]
     else:
         pal = ([plt.get_cmap("tab20")(i) for i in range(20)]
@@ -166,7 +166,9 @@ def main():
     ap.add_argument("--tag", default="tssl256comb215")
     ap.add_argument("--split", default="test_lss")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--tasks", default=",".join(TASKS))
+    ap.add_argument("--tasks", default=",".join(TASKS),
+                    help="default = the 4 multiclass tasks; add `vowcons` for the "
+                         "binary vowel-vs-consonant figures (needs its probe .pt)")
     ap.add_argument("--eval-dir", default=DEFAULT_EVAL)
     ap.add_argument("--cache-dir", default=DEFAULT_CACHE)
     ap.add_argument("--out", default=None, help="default <eval-dir>/figs")

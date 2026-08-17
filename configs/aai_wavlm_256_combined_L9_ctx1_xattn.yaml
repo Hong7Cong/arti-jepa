@@ -64,7 +64,9 @@ model:
   model_name: vit_large
   checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_60.pt  # frozen ep60 snapshot (user choice)
   checkpoint_key: target_encoder
-  use_activation_checkpointing: false   # OFF = fastest; bs3 ctx=1 ~22.7 GB fits with margin
+  use_activation_checkpointing: true    # ON: cross-attn KV over audio pushed bs3 peak past 32 GB
+                                        # (OOM'd 2026-07-08, 29.1 GB alloc + frag). ckpt keeps bs3/
+                                        # eff_batch 128 (fair vs FiLM run) for ~25% speed cost.
 
 loss:
   loss_exp: 1.0

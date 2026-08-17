@@ -26,6 +26,8 @@ meta:
   tag: tssl256
 
 encoder:
+  # default = ckpt_100 (keeps tag=tssl256 caches/results reproducible). For the FINAL
+  # epoch-215 snapshot pass `--checkpoint .../ckpt_215.pt --tag tssl256_215` (own cache).
   checkpoint: /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_100.pt
   key: target_encoder     # EMA target-encoder weights (keys already backbone.*)
   model_name: vit_large

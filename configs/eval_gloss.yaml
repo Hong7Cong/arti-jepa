@@ -1,0 +1,37 @@
+# Pre/post-glossectomy phoneme decoding (Task 9). TRANSFER eval: the usc_lss-trained
+# attentive probe is applied to gloss features (no probe retrain) -> per-condition
+# kappa/PER + t-SNE + confusion matrices. Driver: artijepa/eval_gloss.py.
+# Reuses the usc_lss data path (kind: usc_lss) on gloss manifests written by
+# artijepa/gloss.py. Geometry matches the 256px T-SSL encoder the probe was trained on.
+# dtype float16: the gloss box is a Pascal P100 (no bf16); frozen extraction is robust
+# to the choice (the probe's usc_lss cache was bf16 -- a small, noted precision shift).
+meta:
+  out: /scratch1/hongn/artijepa/eval
+  cache_dir: /scratch1/hongn/artijepa/feat_cache/phoneme
+  seed: 0
+  dtype: float16
+  tag: null            # set per-condition by eval_gloss.py (gloss_pre_* / gloss_post_*)
+
+data:
+  kind: usc_lss        # gloss manifest+JSON are usc_lss-format -> reuse the dataset verbatim
+  manifest: /scratch1/hongn/gloss/gloss_pre_manifest.csv   # overridden per condition
+  grayscale_stats: /scratch1/hongn/artijepa/grayscale_stats.json
+  spatial_size: 256
+  spatial_mode: resize
+  frames_per_clip: 32
+  target_fps: 50.0
+  tubelet_size: 2
+  patch_size: 16
+  intensity_norm: zscore
+  batch_size: 6        # 256px extraction on a 16 GB P100
+  num_workers: 4
+
+encoder:
+  spec: /scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_100.pt   # overridden from probe .pt
+  model_name: vit_large
+  checkpoint: null
+  key: auto
+
+probe:
+  type: attentive      # transfer target: the usc_lss attentive spatial probe
+  loss: ce

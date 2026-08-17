@@ -259,6 +259,11 @@ class TokenProbe(nn.Module):
                        then the same kernel-3 TCN over time (mean -> learned pool).
       attentive     -- V-JEPA's exact AttentivePooler cross-attention block pools S'
                        per temporal step -> [B,T',D] -> linear (no temporal mixing).
+      attentive_lstm-- same AttentivePooler spatial pool -> bi-LSTM over time -> linear.
+                       CE *and* CTC (the only spatial head allowed with CTC): it is
+                       trained in UTTERANCE mode (whole-utterance sequences, see
+                       _UttSpatialDS) so the recurrence and the alignment-free loss
+                       both see the full utterance rather than a 1.28 s chunk.
     """
 
     def __init__(self, dim, num_classes, kind="tcn", hidden=512,
@@ -304,10 +309,19 @@ class TokenProbe(nn.Module):
             self.pooler = AttentivePooler(num_queries=1, embed_dim=dim,
                                           num_heads=heads, mlp_ratio=4.0, depth=1)
             self.head = nn.Linear(dim, num_classes)
+        elif kind == "attentive_lstm":   # AttentivePooler over S' per t, then bi-LSTM
+            from src.models.attentive_pooler import AttentivePooler
+            self.pooler = AttentivePooler(num_queries=1, embed_dim=dim,
+                                          num_heads=heads, mlp_ratio=4.0, depth=1)
+            self.norm = nn.LayerNorm(dim)
+            self.rnn = nn.LSTM(dim, hidden, num_layers=layers, batch_first=True,
+                               bidirectional=True,
+                               dropout=dropout if layers > 1 else 0.0)
+            self.head = nn.Linear(2 * hidden, num_classes)
         else:
             raise ValueError(kind)
 
-    def forward(self, x):                                  # x: [B,T',D]
+    def forward(self, x, lens=None):                       # x: [B,T',D]
         if self.kind in ("linear", "mlp"):
             return self.net(x)
         if self.kind == "tcn":
@@ -327,6 +341,21 @@ class TokenProbe(nn.Module):
             B, T, S, D = x.shape
             q = self.pooler(x.reshape(B * T, S, D)).squeeze(1)  # [B*T,D]
             return self.head(q.reshape(B, T, D))                # [B,T',C]
+        if self.kind == "attentive_lstm":                  # x: [B,T',S',D]
+            B, T, S, D = x.shape
+            q = self.pooler(x.reshape(B * T, S, D)).squeeze(1)  # [B*T,D]
+            h = self.norm(q.reshape(B, T, D))                   # [B,T',D]
+            if lens is None:
+                h, _ = self.rnn(h)
+            else:
+                # Pad tokens must not enter the recurrence: the backward direction
+                # would consume them FIRST and leak zeros into every real timestep.
+                p = nn.utils.rnn.pack_padded_sequence(
+                    h, lens.cpu(), batch_first=True, enforce_sorted=False)
+                h, _ = self.rnn(p)
+                h, _ = nn.utils.rnn.pad_packed_sequence(
+                    h, batch_first=True, total_length=T)         # [B,T',2H]
+            return self.head(h)                                 # [B,T',C]
         # transformer
         h = self.proj(self.norm(x)) + self.pos[:, : x.shape[1]]
         return self.head(self.encoder(h))                  # [B,T',C]
@@ -445,6 +474,21 @@ def load_probe(path, device="cpu"):
     return clf.to(device).eval(), ck
 
 
+def _focal_loss(logits, target, gamma=2.0, ignore_index=P.IGNORE_INDEX):
+    """Multi-class focal loss (Lin et al. 2017): per-frame CE reweighted by (1-p_t)^gamma
+    so the probe stops pouring gradient into easy, high-frequency frames (silence, the
+    dominant vowels) and instead learns the hard / rare phonemes. This is the CE-FAMILY
+    angle on the OOD over-prediction (test_lss PERµ>1.0) that CTC attacks alignment-free:
+    a calmer per-frame posterior emits fewer spurious phonemes at collapse time.
+    gamma=0 reduces exactly to plain CE. Frame-level, so kappa is defined (unlike CTC)."""
+    ce = nn.functional.cross_entropy(logits, target, ignore_index=ignore_index,
+                                     reduction="none")          # [N]; 0 at ignored frames
+    pt = torch.exp(-ce)                                          # prob of the true class
+    fl = ((1.0 - pt) ** gamma) * ce
+    mask = target != ignore_index                               # mean over VALID frames only
+    return fl[mask].mean() if bool(mask.any()) else fl.sum() * 0.0
+
+
 def train_probe(cfg, ftr, ltr, fva, lva, mva, fte, lte, mte,
                 ref_va, ref_te, device, num_classes, drop=(P.SIL_IDX,),
                 extra_tests=None):
@@ -459,6 +503,7 @@ def train_probe(cfg, ftr, ltr, fva, lva, mva, fte, lte, mte,
     opt = torch.optim.AdamW(clf.parameters(), lr=pc.get("lr", 1e-3),
                             weight_decay=pc.get("wd", 0.01))
     lossf = nn.CrossEntropyLoss(ignore_index=P.IGNORE_INDEX)
+    focal = (pc.get("loss", "ce") == "focal"); fgamma = pc.get("focal_gamma", 2.0)
     epochs, warmup, base = pc.get("epochs", 40), pc.get("warmup", 4), pc.get("lr", 1e-3)
     # TRAIN loader: bounded-RAM sequential streaming (see _FeatStream). Sequential per-
     # worker reads + concurrent workers recover FS bandwidth vs the ~tens-of-MB/s random
@@ -481,7 +526,8 @@ def train_probe(cfg, ftr, ltr, fva, lva, mva, fte, lte, mte,
         for x, y in loader:
             x, y = x.to(device), y.to(device)
             opt.zero_grad()
-            loss = lossf(clf(x).reshape(-1, num_classes), y.reshape(-1))
+            logits = clf(x).reshape(-1, num_classes); tgt = y.reshape(-1)
+            loss = _focal_loss(logits, tgt, fgamma) if focal else lossf(logits, tgt)
             loss.backward(); opt.step(); run += float(loss); nb += 1
         tr_loss = run / max(1, nb)
         vm = evaluate(predict(clf, fva, device), lva, mva, ref_va, num_classes, drop)
@@ -637,6 +683,272 @@ def train_probe_ctc(cfg, utt_tr, ref_tr, utt_va, ref_va, utt_te, ref_te,
 
 
 # --------------------------------------------------------------------------- #
+# UTTERANCE mode -- whole-utterance sequences over the SPATIAL cache (Phase 2)
+#
+# Why a second utterance path when train_probe_ctc already exists: that one calls
+# _assemble_utts, which materialises EVERY utterance in RAM. That is fine for the
+# pooled cache (tens of MB) but the spatial cache is ~149 GiB -> instant OOM. Here
+# each utterance is read from the memmap on demand; rows of one utterance are
+# CONTIGUOUS in the cache (extract() writes in manifest order, chunk-ordered), so
+# one item = one ~430 MB SEQUENTIAL read rather than T_u scattered row reads --
+# the same access pattern that fixed the _FeatStream I/O wall (docs/phonePred.md §4.1).
+#
+# Both CE and CTC train through this path so the Phase-2 CE-vs-CTC comparison varies
+# ONLY the loss: same head, same whole-utterance temporal context. (Phase 1's
+# `attentive` x CE keeps its original chunk-mode path untouched.)
+# --------------------------------------------------------------------------- #
+def _utt_runs(meta):
+    """-> [(utt, lo, hi)] one contiguous row run per utterance, in chunk order."""
+    runs = []
+    for n, m in enumerate(meta):
+        u = int(m[0])
+        if runs and runs[-1][0] == u and runs[-1][2] == n:
+            runs[-1][2] = n + 1                      # extend the current run
+        else:
+            runs.append([u, n, n + 1])
+    utts = [r[0] for r in runs]
+    if len(set(utts)) != len(utts):                  # an utt split across >1 run
+        raise SystemExit("[ph-eval] utterance rows are not contiguous in this cache; "
+                         "utterance-mode heads require a contiguous cache")
+    return [tuple(r) for r in runs]
+
+
+class _UttSpatialDS(torch.utils.data.Dataset):
+    """One item = one whole utterance read on demand from the feature cache:
+    (feats [T_u,S',D] f16, labels [T_u], ref [L], utt). Padded tail tokens
+    (label == IGNORE_INDEX) are dropped, so T_u is the true token count."""
+
+    def __init__(self, feats, labels, meta, refs, require_ref=True):
+        self.feats, self.labels, self.refs = feats, labels, refs
+        runs = _utt_runs(meta)
+        # CTC needs a non-empty reference; CE would also score nothing without one.
+        self.runs = [r for r in runs
+                     if not require_ref or len(refs.get(r[0], [])) > 0]
+        lab = np.asarray(labels)
+        self.lengths = [int((lab[lo:hi] != P.IGNORE_INDEX).sum())
+                        for _u, lo, hi in self.runs]
+
+    def __len__(self):
+        return len(self.runs)
+
+    def __getitem__(self, i):
+        utt, lo, hi = self.runs[i]
+        blk = np.array(self.feats[lo:hi], dtype=np.float16)   # ONE sequential read
+        lab = np.asarray(self.labels[lo:hi])
+        valid = lab != P.IGNORE_INDEX                         # [n,T'] over rows+time
+        return (torch.from_numpy(blk[valid]),                 # [T_u,S',D] (f16)
+                torch.from_numpy(lab[valid].astype(np.int64)),
+                torch.tensor(self.refs.get(utt, []), dtype=torch.long),
+                int(utt))
+
+
+def _utt_collate(batch):
+    feats, labs, refs, utts = zip(*batch)
+    in_lens = torch.tensor([f.shape[0] for f in feats], dtype=torch.long)
+    tgt_lens = torch.tensor([r.shape[0] for r in refs], dtype=torch.long)
+    T = int(in_lens.max())
+    x = torch.zeros((len(feats), T) + tuple(feats[0].shape[1:]), dtype=feats[0].dtype)
+    y = torch.full((len(feats), T), P.IGNORE_INDEX, dtype=torch.long)
+    for i, (f, l) in enumerate(zip(feats, labs)):
+        x[i, : f.shape[0]] = f
+        y[i, : l.shape[0]] = l
+    targets = torch.cat(refs) if refs else torch.zeros(0, dtype=torch.long)
+    return x, y, in_lens, targets, tgt_lens, list(utts)
+
+
+class _TokenBudget(torch.utils.data.Sampler):
+    """Batch whole utterances up to ~max_tokens temporal tokens (always >=1 utt).
+
+    Utterances here run 24-123 chunks (T_u ~ 400-2000 tokens) and the spatial grid
+    makes activations scale with the batch's token count * S', so a fixed utterance
+    batch_size would swing peak memory ~5x with utterance length. Budgeting tokens
+    keeps it flat.
+
+    The budget is on the PADDED size len(batch) * max(T_u), NOT sum(T_u): _utt_collate
+    pads every utterance up to the batch's longest, so the padded size is what actually
+    gets allocated. They coincide only for equal-length batches -- on test_lss, whose
+    utterances span 16-560 tokens, budgeting sum() packed twelve 80-token utts next to
+    a 560-token one and allocated [12,560,256,1024] f16 = 3.5 GB per batch (x workers
+    x prefetch -> host OOM). Padded budgeting also stops the wasted compute on pad.
+    """
+
+    def __init__(self, lengths, max_tokens, shuffle=True, seed=0):
+        self.lengths, self.max_tokens = list(lengths), int(max_tokens)
+        self.shuffle, self.seed, self.epoch = shuffle, int(seed), 0
+
+    def __iter__(self):
+        order = np.arange(len(self.lengths))
+        if self.shuffle:
+            np.random.RandomState(self.seed + self.epoch).shuffle(order)
+        batch, mx = [], 0
+        for i in order:
+            L = int(self.lengths[i])
+            m = max(mx, L)
+            if batch and (len(batch) + 1) * m > self.max_tokens:
+                yield batch; batch, mx = [int(i)], L      # i starts the next batch
+            else:
+                batch.append(int(i)); mx = m
+        if batch:
+            yield batch
+
+    def __len__(self):
+        return max(1, sum(1 for _ in iter(self)))
+
+
+def _utt_loader(ds, max_tokens, workers, shuffle, seed=0, persistent=False,
+                prefetch_factor=None):
+    # persistent only for the long-lived TRAIN loader; the eval loaders are rebuilt
+    # every epoch, and persistent workers there would leak a worker pool per call.
+    # host RAM ~= workers * prefetch_factor * padded_batch_bytes; the eval loaders pass
+    # prefetch_factor=1 (see _utt_eval) so a big test_lss batch can't stack 2-deep per
+    # worker and OOM the cgroup (the Jul-15 crash: 4 workers x 2 prefetch x ~1 GB batch).
+    kw = {}
+    if workers > 0 and prefetch_factor is not None:
+        kw["prefetch_factor"] = prefetch_factor
+    return torch.utils.data.DataLoader(
+        ds, batch_sampler=_TokenBudget(ds.lengths, max_tokens, shuffle, seed),
+        num_workers=workers, collate_fn=_utt_collate,
+        persistent_workers=(persistent and workers > 0), **kw)
+
+
+@torch.no_grad()
+def _utt_eval(clf, ds, device, loss_kind, num_classes, drop, max_tokens, workers,
+              amp):
+    """CE -> kappa + frame-acc + PER (argmax->collapse). CTC -> PER only (greedy
+    CTC decode). Deterministic full pass; frames accumulate in RAM (tokens are
+    ~1e5 ints per split, the [S',D] grid never leaves the GPU step)."""
+    clf.eval()
+    blank = num_classes
+    tot_err = tot_ref = 0; pers = []; ps = []; ts = []
+    for x, y, in_lens, _tg, _tl, utts in _utt_loader(ds, max_tokens, workers, False,
+                                                      prefetch_factor=1):
+        x = x.to(device, non_blocking=True)
+        with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp):
+            logits = clf(x, lens=in_lens)
+        ids = logits.float().argmax(-1).cpu().numpy()          # [B,T]
+        for b, u in enumerate(utts):
+            n = int(in_lens[b])
+            seq = ids[b][:n]
+            ref = ds.refs.get(u, [])
+            if loss_kind == "ctc":
+                hyp = _greedy_ctc(seq, blank, drop)
+            else:
+                hyp = P.collapse_sequence(seq, drop=tuple(drop))
+                ps.append(seq); ts.append(y[b][:n].numpy())
+            _, nref = P.phoneme_error_rate(ref, hyp)
+            if nref > 0:
+                e = P.edit_distance(ref, hyp)
+                tot_err += e; tot_ref += nref; pers.append(e / nref)
+    out = {"per_micro": round(tot_err / max(1, tot_ref), 4),
+           "per_macro": round(float(np.mean(pers)) if pers else 1.0, 4),
+           "n_utt": len(pers)}
+    if loss_kind != "ctc":                    # frame metrics need an alignment
+        fp = np.concatenate(ps); ft = np.concatenate(ts)
+        out["kappa"] = P.cohen_kappa(ft, fp, num_classes)
+        out["frame_acc"] = P.frame_accuracy(ft, fp)
+    return out
+
+
+def train_probe_utt(cfg, ds_tr, ds_va, ds_te, device, num_classes, drop=(),
+                    extra_tests=None, loss_kind="ce"):
+    """Utterance-mode probe over the spatial cache: CE, CTC, or FOCAL (Phase 2 loss axis).
+
+    Model-selection: CE/FOCAL on val kappa (higher=better, comparable to Phase 1); CTC on
+    val PER (lower=better -- kappa is undefined without a forced alignment). Focal is a
+    per-frame loss like CE (same head, blank-free, kappa+PER reported), differing only in
+    the (1-p_t)^gamma reweighting -- so it shares CE's entire eval/selection path here.
+    extra_tests: {name: _UttSpatialDS} scored with the same best-val probe.
+    """
+    pc = cfg["probe"]
+    dim = int(ds_tr.feats.shape[-1])
+    blank = num_classes
+    nc = num_classes + (1 if loss_kind == "ctc" else 0)     # CTC adds the blank
+    clf = TokenProbe(dim, nc, kind=pc.get("type", "attentive_lstm"),
+                     hidden=pc.get("hidden", 512), layers=pc.get("layers", 2),
+                     heads=pc.get("heads", 8), dropout=pc.get("dropout", 0.1)).to(device)
+    opt = torch.optim.AdamW(clf.parameters(), lr=pc.get("lr", 1e-3),
+                            weight_decay=pc.get("wd", 0.01))
+    ctc = nn.CTCLoss(blank=blank, zero_infinity=True)
+    ce = nn.CrossEntropyLoss(ignore_index=P.IGNORE_INDEX)
+    fgamma = pc.get("focal_gamma", 2.0)          # focal: CE reweighted by (1-p_t)^gamma
+    mt = pc.get("utt_max_tokens", 1024)
+    # Separate from probe.workers (tuned for the chunk stream's 8 MB rows): one utt-mode
+    # item is a ~0.5 GB read and a collated batch is up to mt*S'*D f16 (~0.54 GB at
+    # mt=1024), and collate runs IN the worker -> host RAM ~= workers * prefetch(2) *
+    # batch_bytes. Keep this modest; the read is FS-bandwidth-bound, not worker-bound.
+    workers = pc.get("utt_workers", 4)
+    # Eval loaders read the big OOD test_lss set and are single-pass (order-invariant),
+    # so they don't need the train loader's throughput. Fewer workers x prefetch_factor=1
+    # (below) bounds their peak host RAM -- the Jul-15 OOM was the eval path stacking
+    # 4 workers x 2 prefetched ~1 GB batches on top of the 64 GB cgroup.
+    eval_workers = pc.get("utt_eval_workers", max(1, min(2, workers)))
+    amp = (device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=amp)
+    epochs = pc.get("epochs", 30); warmup = pc.get("warmup", 4); base = pc.get("lr", 1e-3)
+    seed = cfg["meta"].get("seed", 0)
+    loader = _utt_loader(ds_tr, mt, workers, True, seed, persistent=True)
+    better = (lambda m, b: m["per_micro"] < b) if loss_kind == "ctc" else \
+             (lambda m, b: m["kappa"] > b)
+    best = {"val_score": (2.0 if loss_kind == "ctc" else -1.0)}
+    best_state = None; history = []
+    print(f"[ph-eval] utt-mode {loss_kind}: utts train/val/test = "
+          f"{len(ds_tr)}/{len(ds_va)}/{len(ds_te)}; max_tokens={mt}"
+          + (f"; blank={blank}" if loss_kind == "ctc" else ""))
+    for ep in range(epochs):
+        loader.batch_sampler.epoch = ep                  # reshuffle the batches
+        lr = base * (ep + 1) / max(1, warmup) if ep < warmup else \
+            0.5 * base * (1 + np.cos(np.pi * (ep - warmup) / max(1, epochs - warmup)))
+        for g in opt.param_groups:
+            g["lr"] = lr
+        clf.train(); run = nb = 0; t0 = time.time()
+        for x, y, in_lens, targets, tgt_lens, _ in loader:
+            x = x.to(device, non_blocking=True)
+            with torch.autocast(device_type=device.type, dtype=torch.float16,
+                                enabled=amp):
+                logits = clf(x, lens=in_lens)                  # [B,T,C(+1)]
+            if loss_kind == "ctc":
+                # CTC/log_softmax in fp32: the fp16 dynamic range loses the small
+                # log-probs the forward-backward sums over.
+                logp = logits.float().log_softmax(-1).transpose(0, 1)   # [T,B,C+1]
+                loss = ctc(logp, targets.to(device), in_lens, tgt_lens)
+            else:                                              # per-frame: ce | focal
+                flat = logits.float().reshape(-1, nc); tgt = y.to(device).reshape(-1)
+                loss = _focal_loss(flat, tgt, fgamma) if loss_kind == "focal" \
+                    else ce(flat, tgt)
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward(); scaler.step(opt); scaler.update()
+            run += float(loss); nb += 1
+        tr_loss = run / max(1, nb)
+        vm = _utt_eval(clf, ds_va, device, loss_kind, num_classes, drop, mt,
+                       eval_workers, amp)
+        score = vm["per_micro"] if loss_kind == "ctc" else vm["kappa"]
+        h = {"epoch": ep + 1, "lr": round(lr, 6), "train_loss": round(tr_loss, 4),
+             "val_per_micro": vm["per_micro"], "mins": round((time.time() - t0) / 60, 1)}
+        if loss_kind != "ctc":
+            h["val_kappa"] = vm["kappa"]
+        history.append(h)
+        if better(vm, best["val_score"]):
+            tm = _utt_eval(clf, ds_te, device, loss_kind, num_classes, drop, mt,
+                           eval_workers, amp)
+            best = {"epoch": ep + 1, "val_score": score, "val": vm, "test": tm,
+                    "train_loss": tr_loss}
+            if extra_tests:
+                best["tests"] = {
+                    nm: _utt_eval(clf, d, device, loss_kind, num_classes, drop, mt,
+                                  eval_workers, amp)
+                    for nm, d in extra_tests.items()}
+            best_state = _cpu_state(clf)
+        msg = (f"val PERµ={vm['per_micro']:.3f}" if loss_kind == "ctc"
+               else f"val κ={vm['kappa']:.3f} PERµ={vm['per_micro']:.3f}")
+        print(f"[probe-utt-{loss_kind} e{ep+1}/{epochs}] loss={tr_loss:.3f} "
+              f"lr={lr:.2e} {msg} best={best['val_score']:.3f} "
+              f"({h['mins']:.1f} min)", flush=True)
+    # match the chunk-mode schema: val_kappa (CE) / val_per (CTC) at the top level
+    best["val_per" if loss_kind == "ctc" else "val_kappa"] = best.pop("val_score")
+    return best, best_state, history
+
+
+# --------------------------------------------------------------------------- #
 def run(cfg):
     meta = cfg["meta"]; os.makedirs(meta["out"], exist_ok=True)
     seed = meta.get("seed", 0); np.random.seed(seed); torch.manual_seed(seed)
@@ -647,12 +959,14 @@ def run(cfg):
 
     # spatial-aware heads consume the un-pooled [B,T',S',D] grid (separate cache);
     # all other heads use the mean-over-S' [B,T',D] features (default).
-    SPATIAL_HEADS = {"tcn_spatial", "attentive"}
+    SPATIAL_HEADS = {"tcn_spatial", "attentive", "attentive_lstm"}
+    UTT_HEADS = {"attentive_lstm"}       # trained on whole utterances (CE and CTC)
     ptype = cfg["probe"].get("type", "tcn")
     cfg["data"]["pool_spatial"] = ptype not in SPATIAL_HEADS
     if ptype in SPATIAL_HEADS:
-        if cfg["probe"].get("loss", "ce") == "ctc":
-            raise SystemExit("[ph-eval] spatial heads (tcn_spatial/attentive) are CE-only")
+        if cfg["probe"].get("loss", "ce") == "ctc" and ptype not in UTT_HEADS:
+            raise SystemExit(f"[ph-eval] spatial head '{ptype}' is CE-only "
+                             f"(chunk-mode); use attentive_lstm for spatial + CTC")
         print(f"[ph-eval] spatial-aware probe '{ptype}': caching un-pooled token grid")
 
     # optional extra held-out test splits (e.g. a cross-domain set) evaluated with
@@ -679,7 +993,19 @@ def run(cfg):
         print(f"[ph-eval] extra test '{nm}' = {len(extra_raw[nm][1])} clips")
 
     loss_kind = cfg["probe"].get("loss", "ce")
-    if loss_kind == "ctc":
+    if ptype in UTT_HEADS:
+        # Whole-utterance mode over the spatial cache. Same head + same temporal
+        # context under BOTH losses, so CE-vs-CTC isolates the loss (Phase 2).
+        ref_tr = build_dataset(cfg, "train")[0].reference_sequences()
+        ds_tr = _UttSpatialDS(ftr, ltr, mtr, ref_tr)
+        ds_va = _UttSpatialDS(fva, lva, mva, ref_va)
+        ds_te = _UttSpatialDS(fte, lte, mte, ref_te)
+        extra_tests = {nm: _UttSpatialDS(*extra_raw[nm], extra_ref[nm])
+                       for nm in extra_names}
+        best, best_state, history = train_probe_utt(
+            cfg, ds_tr, ds_va, ds_te, device, num_classes, drop,
+            extra_tests=extra_tests, loss_kind=loss_kind)
+    elif loss_kind == "ctc":
         ref_tr = build_dataset(cfg, "train")[0].reference_sequences()
         utt_tr = _assemble_utts(ftr, ltr, mtr)
         utt_va = _assemble_utts(fva, lva, mva)
@@ -750,9 +1076,11 @@ def main():
     ap.add_argument("--batch", type=int, default=None, help="override data.batch_size")
     ap.add_argument("--probe", default=None,
                     choices=["linear", "mlp", "tcn", "lstm", "transformer",
-                             "tcn_spatial", "attentive"])
-    ap.add_argument("--loss", default=None, choices=["ce", "ctc"],
-                    help="probe training loss: ce (per-token, kappa+PER) | ctc (PER-only)")
+                             "tcn_spatial", "attentive", "attentive_lstm"])
+    ap.add_argument("--loss", default=None, choices=["ce", "ctc", "focal"],
+                    help="probe training loss: ce (per-token, kappa+PER) | ctc (PER-only) "
+                         "| focal (per-token CE reweighted by (1-p_t)^gamma; kappa+PER, "
+                         "gamma via probe.focal_gamma, default 2.0)")
     ap.add_argument("--seed", type=int, default=None,
                     help="override meta.seed (probe init/shuffle only; the frozen "
                          "feature cache is seed-independent, so multi-seed reuses it)")

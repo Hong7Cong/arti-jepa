@@ -356,17 +356,25 @@ def _preproc(num_frames, spatial_size, spatial_mode, intensity_norm,
 
 def make_dataset(rows, num_frames=200, spatial_size=256, spatial_mode="resize",
                  intensity_norm="zscore", grayscale_stats=GRAYSCALE_STATS,
-                 tubelet_size=2, event_pad_s=0.0):
+                 tubelet_size=2, event_pad_s=0.0, task="binary"):
     """A ``DisfluencySegmentDataset`` over binary rows: 200 native-fps frames/clip.
 
     ``event_pad_s`` seconds of context are padded around each window (default 0 --
-    the clip is exactly the disfluency event / matched fluent window). Labels: 0
-    fluent, 1 disfluent (``stutter.row_label(task='binary')``).
+    the clip is exactly the disfluency event / matched fluent window).
+
+    ``task`` selects the label space (``stutter.label_space`` / ``row_label``); rows
+    that do not map to a class are dropped by the dataset:
+
+      ``binary``  0 fluent / 1 disfluent           -- every row kept
+      ``type3``   block / rep / pro                -- fluent negatives + rare
+                  buckets (osci/other) dropped     (docs/STUTTERING.md §13)
+      ``type4``   block / rep / pro / fluent       -- type3 + the negatives
+      ``type5``   block / rep / pro / osci / other -- fluent negatives dropped
     """
     cfg = _preproc(num_frames, spatial_size, spatial_mode, intensity_norm,
                    grayscale_stats, tubelet_size)
-    classes, _ = S.label_space("binary")
-    return BinaryClipDataset(rows, cfg, task="binary", classes=classes,
+    classes, _ = S.label_space(task)
+    return BinaryClipDataset(rows, cfg, task=task, classes=classes,
                              event_pad_s=event_pad_s)
 
 

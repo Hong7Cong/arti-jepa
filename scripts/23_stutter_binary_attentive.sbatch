@@ -16,14 +16,18 @@
 # (space+time jointly), so a spatial-detail gain -- if real -- can surface.
 #
 # Encoders: FAIR-pretrained V-JEPA2 (vjepa_pt) and combined T-SSL ckpt_100 (tssl256),
-# both 256px/32f/z-score. 3 seeds each; features extracted ONCE per encoder
+# both 256px/32f/z-score. Parallel key `tssl256_215` points the same probe/geometry at
+# the FINAL epoch-215 checkpoint (own tag => own feature cache; ckpt_100 rows/caches
+# untouched -- cross-domain phoneme showed ckpt_215 ~= ckpt_100, RESULTS_phonepred.md 1b).
+# 3 seeds each; features extracted ONCE per encoder
 # (pool_mode=none, ~31 GiB fp16 cache) then reused across seeds (frozen -> seed-indep).
 # Compare against the pooled_attentive CIs from run_3seed_pooled.sh.
 #
 # Runs from the ISOLATED worktree of branch stutter-binary-sweep so a concurrent
 # session editing the main checkout cannot change the code mid-job.
 #   sbatch dev_artiJEPA/scripts/23_stutter_binary_attentive.sbatch
-#   sbatch dev_artiJEPA/scripts/23_stutter_binary_attentive.sbatch tssl256   # one encoder
+#   sbatch dev_artiJEPA/scripts/23_stutter_binary_attentive.sbatch tssl256       # one encoder
+#   sbatch dev_artiJEPA/scripts/23_stutter_binary_attentive.sbatch tssl256_215   # final ckpt_215
 set -euo pipefail
 WT=/scratch1/hongn/artijepa/wt_stutter_sweep
 source /apps/conda/miniforge3/25.3.0/etc/profile.d/conda.sh
@@ -35,6 +39,7 @@ export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_TH
 cd "$WT"
 CFG="$WT/configs/eval_stutter_binary.yaml"
 VITL=/scratch1/hongn/artijepa/checkpoints/vitl.pt
+CKPT215=/scratch1/hongn/artijepa/runs/tssl_vitl_256_combined/ckpt_215.pt   # final epoch-215 snapshot
 
 run_enc () {
   local tag="$1"; shift
@@ -48,8 +53,9 @@ run_enc () {
 WHICH=("$@"); [ ${#WHICH[@]} -eq 0 ] && WHICH=(vjepa_pt tssl256)
 for tag in "${WHICH[@]}"; do
   case "$tag" in
-    tssl256)  run_enc tssl256 ;;                                   # config default ckpt_100
-    vjepa_pt) run_enc vjepa_pt --spec pretrained --checkpoint "$VITL" ;;
+    tssl256)     run_enc tssl256 ;;                                # config default ckpt_100
+    tssl256_215) run_enc tssl256_215 --checkpoint "$CKPT215" ;;    # parallel: final ckpt_215, own tag/cache
+    vjepa_pt)    run_enc vjepa_pt --spec pretrained --checkpoint "$VITL" ;;
     *) echo "unknown tag $tag" >&2; exit 1 ;;
   esac
 done

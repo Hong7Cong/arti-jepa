@@ -11,8 +11,11 @@ repo's encoder/predictor/mask machinery and never modifies it. Make sure to save
 > unlabeled rtMRI, initialised from V-JEPA 2 ViT-L, with **label-free**
 > representation-collapse monitoring. The downstream eval is **phoneme prediction**
 > (κ + PER): Task 1 = pseudo phonemes from an audio model on the paired audio;
-> Task 2 = gold phonemes for an OOD speaker (`usc_lss`). See `Arti-JEPA-Plans.md`
-> B.4 / Part C and `TODO.md`. (The old weak stimulus-group probe was removed.)
+> Task 2 = gold phonemes — the OOD speaker `usc_lss` and the 16-speaker
+> **75-Speaker Annot-16** benchmark (in-domain + cross-domain test). See
+> `docs/phonePred.md` (datasets + how to run) and `RESULTS_phonepred.md` (results),
+> `Arti-JEPA-Plans.md` B.4 / Part C and `TODO.md`. (The old weak stimulus-group
+> probe was removed.)
 
 ## Environment
 
@@ -107,7 +110,7 @@ rolling `latest.pt`. (If a hard kill ever lands during the rename, recover with
 | B.1 ViT-L backbone, pretrained init | `model.py`, `checkpoint.py` |
 | B.3 T-SSL (EMA target, L1 feature loss, multiblock masks **re-tuned per grid**) | `tssl_train.py`, `masking.py` |
 | B.3/F **label-free** representation-collapse monitoring | `collapse.py` |
-| B.4/C phoneme prediction eval (κ + PER), gold OOD + pseudo | `eval_phoneme.py`, `phonemes.py`, `usc_lss.py`, `audio_phoneme.py` |
+| B.4/C phoneme prediction eval (κ + PER), gold OOD + pseudo — datasets/run in `docs/phonePred.md`, results in `RESULTS_phonepred.md` | `eval_phoneme.py`, `phonemes.py`, `usc_lss.py`, `audio_phoneme.py` |
 | B.4 probe heads: `linear`/`mlp`/`tcn`/`lstm`/`transformer` (mean-pool S') + **`tcn_spatial`/`attentive` (un-pooled `[B,T',S',D]` grid)** | `eval_phoneme.TokenProbe`, `scripts/06_probe_sweep.sh` / `07_probe_spatial.sh` |
 | D ablations (resolution / clip length / masks / probe / with-vs-without T-SSL) | per-config YAMLs + `masking.mask_config_for` |
 

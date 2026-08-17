@@ -4,12 +4,19 @@ Phases 1-2 slid a fixed window over each utterance and predicted a phoneme label
 *per temporal token* (frame-level sequence task, kappa / PER). **Phase 3 is a
 different task:** one sample = one whole phoneme, cut from the video by its
 start-end alignment, classified with a **single** label (clip-level). We ask how
-well a frozen encoder separates phoneme categories at four granularities:
+well a frozen encoder separates phoneme categories at five granularities:
 
+    * vowcons     -- 2-way  vowel vs consonant     (the coarsest cut; all non-sil)
     * vowels      -- 15-way vowel identity        (monophthongs + diphthongs)
     * consonants  -- 25-way consonant identity
     * manner      -- 5-way  manner of articulation (consonants only)
     * place       -- 8-way  place of articulation  (consonants only)
+
+`vowcons` is the only task that mixes both phoneme families in one label space, so
+it is the natural floor of the ladder: it asks whether the frozen features carry
+the open-vs-constricted vocal-tract distinction at all, before asking for identity.
+Being binary it also reports ROC-AUC / average precision (consonant = positive),
+which the multiclass tasks leave out.
 
 Head = `attentive_lstm` in CLIP mode: V-JEPA's AttentivePooler pools the S'
 spatial tokens per temporal step (learned, *where* in the vocal tract is
@@ -85,6 +92,8 @@ PLACE_CLASS = {
 CONS_MANNER_ORDER = ["Plosive", "Fricative", "Affricate", "Nasal", "Approximant"]
 PLACE_ORDER = ["Bilabial", "Labiodental", "Dental", "Alveolar", "Postalveolar",
                "Palatal", "Velar", "Glottal"]
+# binary vowel-vs-consonant: consonant is class 1 (the "positive" class for AUC/AP)
+VOWCONS_ORDER = ["Vowel", "Consonant"]
 VOWEL_CLASSES = {"Vowel", "Diphthong"}
 CONS_CLASSES = set(CONS_MANNER_ORDER)
 VOWEL_PHON = [p for p in P.ARPABET if PHON_CLASS.get(p) in VOWEL_CLASSES]   # 15
@@ -98,6 +107,13 @@ def build_tasks():
     and select/relabel: `members` filters clips, the map turns a phoneme index into
     the task's class index, `names` gives the confusion-matrix axis order."""
     tasks = {}
+    # binary: the only task spanning BOTH families -- every non-sil phoneme is a
+    # member, relabelled to its family (vowel/diphthong -> 0, consonant -> 1).
+    tasks["vowcons"] = (
+        {P.PHON2IDX[p] for p in VOWEL_PHON + CONS_PHON},
+        {**{P.PHON2IDX[p]: 0 for p in VOWEL_PHON},
+         **{P.PHON2IDX[p]: 1 for p in CONS_PHON}},
+        list(VOWCONS_ORDER))
     # identity tasks: class == the phoneme itself
     tasks["vowels"] = (
         {P.PHON2IDX[p] for p in VOWEL_PHON},
@@ -436,14 +452,18 @@ def _predict(clf, ds, device, bs, workers, amp):
     loader = torch.utils.data.DataLoader(
         ds, batch_sampler=_LenBucketSampler(ds.lengths, bs, shuffle=False),
         num_workers=nw, collate_fn=_clip_collate)
-    ps, ts = [], []
+    ps, ts, sc = [], [], []
     for x, y, lens in loader:
         x = x.to(device, non_blocking=True)
         with torch.autocast(device_type=device.type, dtype=torch.float16, enabled=amp):
             logits = clf(x, lens)
-        ps.append(logits.float().argmax(-1).cpu().numpy())
+        logits = logits.float()
+        ps.append(logits.argmax(-1).cpu().numpy())
+        # softmax scores kept for threshold-free binary metrics (AUC/AP); a few MB
+        # even on test_lss, and the multiclass tasks simply ignore them.
+        sc.append(torch.softmax(logits, -1).cpu().numpy())
         ts.append(y.numpy())
-    return np.concatenate(ts), np.concatenate(ps)
+    return np.concatenate(ts), np.concatenate(ps), np.concatenate(sc)
 
 
 def kappa_from_cm(cm):
@@ -461,7 +481,13 @@ def kappa_from_cm(cm):
     return float((po - pe) / (1.0 - pe)) if pe < 1.0 else float("nan")
 
 
-def _metrics(y_true, y_pred, n_classes, names):
+def _metrics(y_true, y_pred, n_classes, names, scores=None):
+    """Macro/weighted P/R/F1 + per-class + confusion matrix (+ kappa).
+
+    `scores` (optional, [N, n_classes] softmax) adds the threshold-free binary
+    metrics for a 2-class task -- `roc_auc` and `average_precision`, both with
+    class 1 (`vowcons`: Consonant) as the positive class. Multiclass callers may
+    pass it or not; it is ignored there."""
     from sklearn.metrics import (precision_recall_fscore_support,
                                   confusion_matrix, accuracy_score)
     labels = list(range(n_classes))
@@ -472,8 +498,18 @@ def _metrics(y_true, y_pred, n_classes, names):
     pp, rr, ff, ss = precision_recall_fscore_support(
         y_true, y_pred, labels=labels, average=None, zero_division=0)
     cm = confusion_matrix(y_true, y_pred, labels=labels)
+    extra = {}
+    if n_classes == 2 and scores is not None and len(np.unique(y_true)) == 2:
+        from sklearn.metrics import roc_auc_score, average_precision_score
+        pos = np.asarray(scores)[:, 1]
+        extra["roc_auc"] = round(float(roc_auc_score(y_true, pos)), 4)
+        extra["average_precision"] = round(
+            float(average_precision_score(y_true, pos)), 4)
+        # the binary headline alongside macro-F1: F1 of the positive class alone
+        extra["f1_binary"] = round(float(ff[1]), 4)
     return {
         "n": int(len(y_true)),
+        **extra,
         "accuracy": round(float(accuracy_score(y_true, y_pred)), 4),
         "kappa": round(kappa_from_cm(cm), 4),
         "f1_macro": round(float(f_ma), 4), "f1_weighted": round(float(f_w), 4),
@@ -534,8 +570,8 @@ def train_task(cfg, task, splits, device):
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward(); scaler.step(opt); scaler.update()
             run += float(loss); nb += 1
-        yt, yp = _predict(clf, ds_va, device, bs, workers, amp)
-        vm = _metrics(yt, yp, n_classes, names)
+        yt, yp, ysc = _predict(clf, ds_va, device, bs, workers, amp)
+        vm = _metrics(yt, yp, n_classes, names, ysc)
         history.append({"epoch": ep + 1, "train_loss": round(run / max(1, nb), 4),
                         "val_f1_macro": vm["f1_macro"], "val_acc": vm["accuracy"],
                         "mins": round((time.time() - t0) / 60, 2)})
@@ -559,8 +595,8 @@ def train_task(cfg, task, splits, device):
     for nm in ("test", "test_lss"):
         if nm in splits:
             ds = _ClipDS(*splits[nm], members, remap, preload=True, budget_gb=budget)
-            yt, yp = _predict(clf, ds, device, bs, workers, amp)
-            best[nm] = _metrics(yt, yp, n_classes, names)
+            yt, yp, ysc = _predict(clf, ds, device, bs, workers, amp)
+            best[nm] = _metrics(yt, yp, n_classes, names, ysc)
             del ds; gc.collect()
     best["_state"] = best_state          # popped + written to .pt by run()
     return best
@@ -591,6 +627,19 @@ def run(cfg):
            "frames_per_clip": cfg["data"]["frames_per_clip"],
            "target_fps": cfg["data"].get("target_fps", 50.0),
            "head": "attentive_lstm_clip", "tasks": {}}
+    # A task-subset run (e.g. --tasks vowcons on top of an already-complete file)
+    # MERGES into the existing JSON for this tag+seed instead of truncating it:
+    # tasks in `only` are recomputed, every other previously-written task is kept.
+    if os.path.exists(stem + ".json"):
+        try:
+            prev = json.load(open(stem + ".json")).get("tasks", {})
+        except (ValueError, OSError) as e:
+            print(f"[phg] WARNING: ignoring unreadable {stem}.json ({e})", flush=True)
+            prev = {}
+        keep = {k: v for k, v in prev.items() if k not in only}
+        if keep:
+            out["tasks"].update(keep)
+            print(f"[phg] merging into existing JSON; keeping {sorted(keep)}", flush=True)
     for tname in only:
         print(f"\n===== TASK: {tname} =====", flush=True)
         t0 = time.time()
@@ -625,12 +674,16 @@ def run(cfg):
             }, wp)
             print(f"[phg] wrote probe weights {wp}", flush=True)
         json.dump(out, open(stem + ".json", "w"), indent=2)   # incremental: never lose a task
-        print(f"[phg] wrote {stem}.json ({len(out['tasks'])}/{len(only)} tasks)", flush=True)
+        ndone = sum(t in out["tasks"] for t in only)
+        print(f"[phg] wrote {stem}.json ({ndone}/{len(only)} tasks this run, "
+              f"{len(out['tasks'])} total)", flush=True)
 
     print("\n===== PHONEME-GROUPS RESULT (f1_macro) =====", flush=True)
     for tname, res in out["tasks"].items():
-        row = " ".join(f"{k}={res.get(k, {}).get('f1_macro', '-')}"
-                       for k in ("val", "test", "test_lss") if k in res)
+        row = " ".join(
+            f"{k}={res.get(k, {}).get('f1_macro', '-')}" +
+            (f"(auc={res[k]['roc_auc']})" if "roc_auc" in res.get(k, {}) else "")
+            for k in ("val", "test", "test_lss") if k in res)
         print(f"  {tname:12s} {row}", flush=True)
     return out
 
@@ -665,7 +718,8 @@ def main():
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--dtype", default=None, choices=["bfloat16", "float16", "float32"])
     ap.add_argument("--tasks", default=None,
-                    help="comma list subset of vowels,consonants,manner,place")
+                    help="comma list subset of vowcons,vowels,consonants,manner,place "
+                         "(a subset run merges into the existing JSON for tag+seed)")
     ap.add_argument("--limit", type=int, default=None,
                     help="DEBUG: cap clips per split (own cache); smoke-test the pipeline")
     args = ap.parse_args()
