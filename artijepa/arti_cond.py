@@ -118,7 +118,7 @@ class ArtiConditionedPredictor(nn.Module):
                  use_rope=True, frame_causal=True, use_activation_checkpointing=False,
                  use_extrinsics=False, spk_dim=None, normalize_reps=True):
         super().__init__()
-        from src.models.ac_predictor import vit_ac_predictor
+        from artijepa._vendor.src.models.ac_predictor import vit_ac_predictor
         self.backbone = vit_ac_predictor(
             img_size=img_size, patch_size=patch_size, num_frames=num_frames,
             tubelet_size=tubelet_size, embed_dim=embed_dim,

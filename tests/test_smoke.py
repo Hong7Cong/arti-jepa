@@ -112,7 +112,7 @@ def test_dataset(split):
 
 
 def test_mask_collator(ds):
-    from src.masks.multiseq_multiblock3d import MaskCollator
+    from artijepa._vendor.src.masks.multiseq_multiblock3d import MaskCollator
     from artijepa.masking import mask_config_for
     cfgs_mask = mask_config_for(256 // 16)  # 16x16 grid
     mc = MaskCollator(cfgs_mask=cfgs_mask, dataset_fpcs=[32], crop_size=256,

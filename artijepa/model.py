@@ -29,7 +29,7 @@ def build_models(
     use_activation_checkpointing=True,
     use_sdpa=True,
 ):
-    from app.vjepa.utils import init_video_model
+    from artijepa._vendor.app.vjepa.utils import init_video_model
 
     encoder, predictor = init_video_model(
         device=device,

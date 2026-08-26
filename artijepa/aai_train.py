@@ -42,7 +42,7 @@ def init_opt_predictor_only(predictor, iterations_per_epoch, start_lr, ref_lr,
     optimizer state with frozen tensors). Mirrors ``app.vjepa.utils.init_opt``
     (no-WD on biases / 1-D params).
     """
-    from src.utils.schedulers import CosineWDSchedule, WarmupCosineSchedule
+    from artijepa._vendor.src.utils.schedulers import CosineWDSchedule, WarmupCosineSchedule
 
     named = [(n, p) for n, p in predictor.named_parameters() if p.requires_grad]
     param_groups = [

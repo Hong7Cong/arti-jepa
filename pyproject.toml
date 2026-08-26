@@ -25,6 +25,7 @@ dependencies = [
   "scikit-learn",
   "transformers>=4.44",
   "timm",
+  "einops",
   "huggingface_hub",
   "safetensors",
 ]
@@ -36,10 +37,15 @@ dev = ["pytest"]
 [project.urls]
 Homepage = "https://github.com/Hong7Cong/arti-jepa"
 
-[tool.setuptools]
+[tool.setuptools.packages.find]
 # Flat layout with several non-package top-level dirs (configs/, scripts/,
-# tests/, logs/, ...), so discovery must be explicit.
-packages = ["artijepa"]
+# tests/, logs/, ...), so discovery must be explicit. `artijepa*` also picks up
+# the vendored V-JEPA 2 subset under artijepa/_vendor/.
+include = ["artijepa*"]
+
+[tool.setuptools.package-data]
+# Ship upstream's MIT license alongside the vendored code.
+"artijepa._vendor" = ["LICENSE"]
 
 [tool.setuptools.dynamic]
 version = { attr = "artijepa.__version__" }

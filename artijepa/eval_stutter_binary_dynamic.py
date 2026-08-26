@@ -218,7 +218,7 @@ class DynamicSeqProbe(nn.Module):
         self.kind = kind
         self.drop = nn.Dropout(dropout)
         if kind == "seq_attentive_lstm":
-            from src.models.attentive_pooler import AttentivePooler
+            from artijepa._vendor.src.models.attentive_pooler import AttentivePooler
             self.chunk = int(chunk) or 32
             self.use_ckpt = bool(checkpoint)
             self.spatial_pool = AttentivePooler(num_queries=1, embed_dim=dim,

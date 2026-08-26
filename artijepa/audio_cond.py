@@ -134,7 +134,7 @@ class AudioConditionedPredictor(nn.Module):
                  use_extrinsics=False, spk_dim=None, normalize_reps=True,
                  cond_mode="concat", cross_attn_heads=None):
         super().__init__()
-        from src.models.ac_predictor import vit_ac_predictor
+        from artijepa._vendor.src.models.ac_predictor import vit_ac_predictor
         self.backbone = vit_ac_predictor(
             img_size=img_size, patch_size=patch_size, num_frames=num_frames,
             tubelet_size=tubelet_size, embed_dim=embed_dim,
@@ -158,7 +158,7 @@ class AudioConditionedPredictor(nn.Module):
             f"cond_mode={cond_mode!r} not in (concat, film, cross_attn)"
         self.cond_mode = cond_mode
         if cond_mode != "concat":
-            from src.models.utils.modules import build_action_block_causal_attention_mask
+            from artijepa._vendor.src.models.utils.modules import build_action_block_causal_attention_mask
             D = pred_embed_dim
             # frame-causal self-attn mask over the H*W visual tokens per frame ONLY
             # (no prepended audio tokens -> add_tokens=0); sliced to N per call.

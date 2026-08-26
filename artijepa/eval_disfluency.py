@@ -250,12 +250,12 @@ class SegmentProbe(nn.Module):
         self.kind = kind
         self.drop = nn.Dropout(dropout)
         if kind in ("attentive", "pooled_attentive"):
-            from src.models.attentive_pooler import AttentivePooler
+            from artijepa._vendor.src.models.attentive_pooler import AttentivePooler
             self.pooler = AttentivePooler(num_queries=1, embed_dim=dim,
                                           num_heads=heads, mlp_ratio=4.0, depth=1)
             self.head = nn.Linear(dim, num_classes)
         elif kind == "attentive_lstm":
-            from src.models.attentive_pooler import AttentivePooler
+            from artijepa._vendor.src.models.attentive_pooler import AttentivePooler
             assert t_steps, "attentive_lstm needs t_steps (# temporal tokens T')"
             self.t_steps = int(t_steps)
             self.chunk = int(chunk) or self.t_steps    # temporal chunk for the spatial pool

@@ -347,7 +347,7 @@ class ClipProbe(nn.Module):
 
     def __init__(self, dim, num_classes, hidden=512, layers=2, heads=8, dropout=0.1):
         super().__init__()
-        from src.models.attentive_pooler import AttentivePooler
+        from artijepa._vendor.src.models.attentive_pooler import AttentivePooler
         self.pooler = AttentivePooler(num_queries=1, embed_dim=dim,
                                       num_heads=heads, mlp_ratio=4.0, depth=1)
         self.norm = nn.LayerNorm(dim)

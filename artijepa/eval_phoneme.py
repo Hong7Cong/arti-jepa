@@ -305,12 +305,12 @@ class TokenProbe(nn.Module):
             self.c2 = nn.Conv1d(hidden, hidden, 3, padding=1)
             self.head = nn.Linear(hidden, num_classes)
         elif kind == "attentive":    # V-JEPA AttentivePooler over S' per t -> classify
-            from src.models.attentive_pooler import AttentivePooler
+            from artijepa._vendor.src.models.attentive_pooler import AttentivePooler
             self.pooler = AttentivePooler(num_queries=1, embed_dim=dim,
                                           num_heads=heads, mlp_ratio=4.0, depth=1)
             self.head = nn.Linear(dim, num_classes)
         elif kind == "attentive_lstm":   # AttentivePooler over S' per t, then bi-LSTM
-            from src.models.attentive_pooler import AttentivePooler
+            from artijepa._vendor.src.models.attentive_pooler import AttentivePooler
             self.pooler = AttentivePooler(num_queries=1, embed_dim=dim,
                                           num_heads=heads, mlp_ratio=4.0, depth=1)
             self.norm = nn.LayerNorm(dim)

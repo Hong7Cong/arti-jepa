@@ -42,17 +42,12 @@ The repo is private, so `https://` needs a PAT (or use
 `git+ssh://git@github.com/Hong7Cong/arti-jepa.git` with your SSH key). Pin a
 commit/branch with `@<ref>` before the `#egg=` fragment.
 
-**V-JEPA 2 dependency.** Several modules lazily import the parent repo
-(`src.models.attentive_pooler`, `src.utils.schedulers`, `app.*`). Upstream
-vjepa2 is *not* pip-installable under those names, so point at a checkout:
-
-```bash
-git clone https://github.com/facebookresearch/vjepa2.git
-export VJEPA2_REPO=$PWD/vjepa2      # artijepa/__init__.py prepends this to sys.path
-```
-
-Without it, `import artijepa.*` still works — only the V-JEPA-2-backed code
-paths (encoder/predictor/attentive-pooler construction) fail.
+**V-JEPA 2 is vendored.** The subset arti-jepa actually reaches (15 modules of
+upstream's `src/` and `app/`) lives under `artijepa/_vendor/`, with `src.*` /
+`app.*` imports rewritten to `artijepa._vendor.*`. No vjepa2 checkout on
+`PYTHONPATH` is needed. Upstream is MIT-licensed; the license ships in
+`artijepa/_vendor/LICENSE`. To refresh, re-copy from upstream and re-apply the
+import rewrite (see `artijepa/_vendor/__init__.py`).
 
 **Not shipped in the wheel:** `configs/`, `scripts/`, and `tests/` live outside
 the `artijepa/` package, so an install from GitHub gives you the importable

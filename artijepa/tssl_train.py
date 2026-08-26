@@ -123,8 +123,8 @@ def train(cfg):
     print(f"[tssl] grid={spatial_tokens}x{spatial_tokens}, "
           f"{data['frames_per_clip'] // 2} temporal; {len(cfgs_mask)} mask(s)")
 
-    from src.masks.multiseq_multiblock3d import MaskCollator
-    from src.masks.utils import apply_masks
+    from artijepa._vendor.src.masks.multiseq_multiblock3d import MaskCollator
+    from artijepa._vendor.src.masks.utils import apply_masks
 
     mask_collator = MaskCollator(
         cfgs_mask=cfgs_mask, dataset_fpcs=[data["frames_per_clip"]],
@@ -166,7 +166,7 @@ def train(cfg):
     target_encoder = make_target_encoder(encoder)
 
     # -- optimizer / schedulers (reuse repo recipe machinery)
-    from app.vjepa.utils import init_opt
+    from artijepa._vendor.app.vjepa.utils import init_opt
     optimizer, scaler, scheduler, wd_scheduler = init_opt(
         is_anneal=False, encoder=encoder, predictor=predictor,
         wd=float(opt_c["weight_decay"]), final_wd=float(opt_c["final_weight_decay"]),
