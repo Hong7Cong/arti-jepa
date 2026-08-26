@@ -17,6 +17,49 @@ repo's encoder/predictor/mask machinery and never modifies it. Make sure to save
 > `Arti-JEPA-Plans.md` B.4 / Part C and `TODO.md`. (The old weak stimulus-group
 > probe was removed.)
 
+## Installation (pip)
+
+The package is `artijepa`; `pyproject.toml` at this directory's root makes it
+pip-installable straight from GitHub.
+
+```bash
+# 1) install the right torch build FIRST (see setup_env.sh) so pip does not
+#    pull a default-CUDA wheel from PyPI over it
+pip install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
+
+# 2a) install from GitHub (non-editable)
+pip install "git+https://github.com/Hong7Cong/arti-jepa.git"
+
+# 2b) or clone + editable, for development
+git clone https://github.com/Hong7Cong/arti-jepa.git
+pip install -e ./arti-jepa
+
+# 2c) or editable straight from git (pip clones into ./src/arti-jepa)
+pip install -e "git+https://github.com/Hong7Cong/arti-jepa.git#egg=arti-jepa"
+```
+
+The repo is private, so `https://` needs a PAT (or use
+`git+ssh://git@github.com/Hong7Cong/arti-jepa.git` with your SSH key). Pin a
+commit/branch with `@<ref>` before the `#egg=` fragment.
+
+**V-JEPA 2 dependency.** Several modules lazily import the parent repo
+(`src.models.attentive_pooler`, `src.utils.schedulers`, `app.*`). Upstream
+vjepa2 is *not* pip-installable under those names, so point at a checkout:
+
+```bash
+git clone https://github.com/facebookresearch/vjepa2.git
+export VJEPA2_REPO=$PWD/vjepa2      # artijepa/__init__.py prepends this to sys.path
+```
+
+Without it, `import artijepa.*` still works — only the V-JEPA-2-backed code
+paths (encoder/predictor/attentive-pooler construction) fail.
+
+**Not shipped in the wheel:** `configs/`, `scripts/`, and `tests/` live outside
+the `artijepa/` package, so an install from GitHub gives you the importable
+library and `python -m artijepa.<module>` entry points only. Clone the repo if
+you need the YAML configs or the SLURM launchers.
+
+
 ## Environment
 
 The stock `vjepa2-312` env ships `torch 2.12+cu130`, which **cannot drive this

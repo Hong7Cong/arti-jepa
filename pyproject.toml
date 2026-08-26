@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arti-jepa"
+description = "Adapting V-JEPA 2 to real-time MRI (rtMRI) vocal-tract video."
+readme = "README.md"
+requires-python = ">=3.11"
+dynamic = ["version"]
+authors = [{ name = "Hong Nguyen", email = "hongn@usc.edu" }]
+
+# NOTE: torch is listed with a loose floor only. On CUDA machines install the
+# right wheel FIRST (see setup_env.sh, e.g. torch==2.6.0+cu124 for V100), then
+# install this package -- pip will see the requirement already satisfied and
+# will not clobber it with a default-CUDA wheel from PyPI.
+dependencies = [
+  "torch>=2.4",
+  "numpy<2.3",
+  "decord==0.6.0",
+  "opencv-python-headless",
+  "pyyaml",
+  "matplotlib",
+  "scipy",
+  "scikit-learn",
+  "transformers>=4.44",
+  "timm",
+  "huggingface_hub",
+  "safetensors",
+]
+
+[project.optional-dependencies]
+viz = ["umap-learn"]
+dev = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/Hong7Cong/arti-jepa"
+
+[tool.setuptools]
+# Flat layout with several non-package top-level dirs (configs/, scripts/,
+# tests/, logs/, ...), so discovery must be explicit.
+packages = ["artijepa"]
+
+[tool.setuptools.dynamic]
+version = { attr = "artijepa.__version__" }
+
+[tool.isort]
+profile = "black"
+line_length = 119
+
+[tool.black]
+line-length = 119
